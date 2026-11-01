@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"time"
 )
 
 const (
@@ -27,13 +26,11 @@ const (
 )
 
 func main() {
-	seed := time.Now().UnixNano()
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(1))
 
 	weights := randomSymmetricWeights(rng)
 	ranks := pageRank(weights)
 
-	fmt.Printf("seed %d\n", seed)
 	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
