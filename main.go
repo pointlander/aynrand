@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file.
 
 // -g perturbs one integer link weight by ±1.
-// -e gives every node an (x, y, z) coordinate and sets each link weight to
-// the Euclidean distance. A random pair is moved so that distance changes
-// by 1. Either model keeps a proposal when the Shannon entropy of PageRank
-// decreases.
+// -e gives every node an (x, y, z) coordinate. PageRank uses e to the minus
+// Euclidean distance as the link weight. A random pair is moved so that
+// distance changes by 1. Either model keeps a proposal when the Shannon
+// entropy of PageRank decreases.
 package main
 
 import (
@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	nodeCount = 33
 	minWeight = 1
 	maxWeight = 33
 	damping   = 0.85
 	tolerance = 1e-15
 	maxIter   = 10000
 )
+
+var nodeCount = 33
 
 var (
 	// FlagGraphical graphical model
@@ -35,6 +36,7 @@ var (
 func main() {
 	flag.Parse()
 	if *FlagEuclidean {
+		nodeCount *= 10
 		euclidean()
 		return
 	}
@@ -111,9 +113,9 @@ type point struct {
 }
 
 // euclidean is the graphical model with each node placed in R^3.
-// The link weight is the Euclidean distance. Moving a pair closer or farther
-// by 1 is the stand-in for a ±1 weight edit; every other distance changes
-// with them because the points share one embedding.
+// PageRank and its entropy see link weight e^{-distance}. Moving a pair
+// closer or farther by 1 is the stand-in for a ±1 distance edit; every other
+// distance changes with them because the points share one embedding.
 func euclidean() {
 	rng := rand.New(rand.NewSource(1))
 
@@ -128,7 +130,7 @@ func euclidean() {
 	}
 	ranks := pageRank(linkWeights(points))
 
-	fmt.Printf("33-node euclidean graph, coordinates uniform on [%d, %d), link weight is distance, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Printf("33-node euclidean graph, coordinates uniform on [%d, %d), link weight is e^-distance, damping %g\n", minWeight, maxWeight, damping)
 	printPoints(points)
 	fmt.Println("initial")
 	printRanks(ranks)
@@ -142,8 +144,9 @@ func euclidean() {
 			shiftPair(points, a, b, +1)
 			plus := pageRank(linkWeights(points))
 			if raisedBoth(plus, ranks, a, b) {
+				afterDist := distance(points[a], points[b])
 				fmt.Println("++++++++++++++++++++++++++++++++++")
-				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f\n", step, a+1, b+1, beforeDist, distance(points[a], points[b]))
+				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
 				printPoint(a, points[a])
 				printPoint(b, points[b])
 				printRanks(plus)
@@ -161,8 +164,9 @@ func euclidean() {
 			shiftPair(points, a, b, -1)
 			minus := pageRank(linkWeights(points))
 			if raisedBoth(minus, ranks, a, b) {
+				afterDist := distance(points[a], points[b])
 				fmt.Println("----------------------------------")
-				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f\n", step, a+1, b+1, beforeDist, distance(points[a], points[b]))
+				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
 				printPoint(a, points[a])
 				printPoint(b, points[b])
 				printRanks(minus)
@@ -207,7 +211,7 @@ func linkWeights(points []point) [][]float64 {
 			if i == j {
 				continue
 			}
-			weights[i][j] = distance(points[i], points[j])
+			weights[i][j] = math.Exp(-distance(points[i], points[j]))
 		}
 	}
 	return weights
