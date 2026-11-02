@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// A 33-node undirected graph starts with symmetric integer weights drawn from
-// 1..33. Each step picks a random pair and tries +1 on that link. The change
-// is kept when it does not raise both endpoints' PageRank (one staying flat
-// or falling is enough). When +1 does raise both, the link is set one below
-// its value at the start of the step, and that decrease is kept when it
-// likewise fails to raise both. Otherwise the weight is put back.
+// -g perturbs one integer link weight by ±1.
+// -e gives every node an (x, y, z) coordinate and sets each link weight to
+// the Euclidean distance. A random pair is moved so that distance changes
+// by 1. Either model keeps a proposal when the Shannon entropy of PageRank
+// decreases.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -25,11 +25,31 @@ const (
 	maxIter   = 10000
 )
 
+var (
+	// FlagGraphical graphical model
+	FlagGraphical = flag.Bool("g", false, "graphical model")
+	// FlagEuclidean euclidean graphical model
+	FlagEuclidean = flag.Bool("e", false, "euclidean graphical model")
+)
+
 func main() {
+	flag.Parse()
+	if *FlagEuclidean {
+		euclidean()
+		return
+	}
+	if *FlagGraphical {
+		graphical()
+		return
+	}
+}
+
+// graphical model
+func graphical() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := randomSymmetricWeights(rng)
-	ranks := pageRank(weights)
+	ranks := pageRank(toFloat(weights))
 
 	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
 	fmt.Println("initial")
@@ -42,7 +62,7 @@ func main() {
 
 		add := func() bool {
 			setWeight(weights, a, b, before+1)
-			plus := pageRank(weights)
+			plus := pageRank(toFloat(weights))
 			plusBoth := raisedBoth(plus, beforeRanks, a, b)
 			if plusBoth {
 				fmt.Println("++++++++++++++++++++++++++++++++++")
@@ -61,7 +81,7 @@ func main() {
 			}
 
 			setWeight(weights, a, b, before-1)
-			minus := pageRank(weights)
+			minus := pageRank(toFloat(weights))
 			minusBoth := raisedBoth(minus, beforeRanks, a, b)
 			if minusBoth {
 				fmt.Println("----------------------------------")
@@ -84,6 +104,133 @@ func main() {
 			}
 		}
 	}
+}
+
+type point struct {
+	x, y, z float64
+}
+
+// euclidean is the graphical model with each node placed in R^3.
+// The link weight is the Euclidean distance. Moving a pair closer or farther
+// by 1 is the stand-in for a ±1 weight edit; every other distance changes
+// with them because the points share one embedding.
+func euclidean() {
+	rng := rand.New(rand.NewSource(1))
+
+	points := make([]point, nodeCount)
+	span := float64(maxWeight - minWeight)
+	for i := range points {
+		points[i] = point{
+			x: float64(minWeight) + rng.Float64()*span,
+			y: float64(minWeight) + rng.Float64()*span,
+			z: float64(minWeight) + rng.Float64()*span,
+		}
+	}
+	ranks := pageRank(linkWeights(points))
+
+	fmt.Printf("33-node euclidean graph, coordinates uniform on [%d, %d), link weight is distance, damping %g\n", minWeight, maxWeight, damping)
+	printPoints(points)
+	fmt.Println("initial")
+	printRanks(ranks)
+
+	for step := 1; ; step++ {
+		a, b := randomPair(rng)
+		pa, pb := points[a], points[b]
+		beforeDist := distance(pa, pb)
+
+		add := func() bool {
+			shiftPair(points, a, b, +1)
+			plus := pageRank(linkWeights(points))
+			if raisedBoth(plus, ranks, a, b) {
+				fmt.Println("++++++++++++++++++++++++++++++++++")
+				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f\n", step, a+1, b+1, beforeDist, distance(points[a], points[b]))
+				printPoint(a, points[a])
+				printPoint(b, points[b])
+				printRanks(plus)
+				ranks = plus
+				return true
+			}
+			points[a], points[b] = pa, pb
+			return false
+		}
+
+		subtract := func() bool {
+			if beforeDist-1 < 1 {
+				return false
+			}
+			shiftPair(points, a, b, -1)
+			minus := pageRank(linkWeights(points))
+			if raisedBoth(minus, ranks, a, b) {
+				fmt.Println("----------------------------------")
+				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f\n", step, a+1, b+1, beforeDist, distance(points[a], points[b]))
+				printPoint(a, points[a])
+				printPoint(b, points[b])
+				printRanks(minus)
+				ranks = minus
+				return true
+			}
+			points[a], points[b] = pa, pb
+			return false
+		}
+
+		if rng.Intn(2) == 0 {
+			if !add() {
+				subtract()
+			}
+		} else {
+			if !subtract() {
+				add()
+			}
+		}
+	}
+}
+
+func printPoints(points []point) {
+	for i, p := range points {
+		printPoint(i, p)
+	}
+}
+
+func printPoint(i int, p point) {
+	fmt.Printf("node %d x:%.6f y:%.6f z:%.6f\n", i+1, p.x, p.y, p.z)
+}
+
+func distance(p, q point) float64 {
+	return math.Hypot(p.x-q.x, math.Hypot(p.y-q.y, p.z-q.z))
+}
+
+func linkWeights(points []point) [][]float64 {
+	weights := make([][]float64, len(points))
+	for i := range points {
+		weights[i] = make([]float64, len(points))
+		for j := range points {
+			if i == j {
+				continue
+			}
+			weights[i][j] = distance(points[i], points[j])
+		}
+	}
+	return weights
+}
+
+// shiftPair moves a and b equally along the line between them so their
+// distance changes by delta. Positive delta pushes them apart.
+func shiftPair(points []point, a, b int, delta float64) {
+	dx := points[b].x - points[a].x
+	dy := points[b].y - points[a].y
+	dz := points[b].z - points[a].z
+	d := math.Hypot(dx, math.Hypot(dy, dz))
+	ux, uy, uz := 1.0, 0.0, 0.0
+	if d != 0 {
+		ux, uy, uz = dx/d, dy/d, dz/d
+	}
+	half := delta / 2
+	points[a].x -= ux * half
+	points[a].y -= uy * half
+	points[a].z -= uz * half
+	points[b].x += ux * half
+	points[b].y += uy * half
+	points[b].z += uz * half
 }
 
 func randomSymmetricWeights(rng *rand.Rand) [][]int {
@@ -143,15 +290,26 @@ func printRanks(ranks []float64) {
 	fmt.Printf(" sum:%.8f\n", sum)
 }
 
+func toFloat(weights [][]int) [][]float64 {
+	out := make([][]float64, len(weights))
+	for i := range weights {
+		out[i] = make([]float64, len(weights[i]))
+		for j := range weights[i] {
+			out[i][j] = float64(weights[i][j])
+		}
+	}
+	return out
+}
+
 // pageRank is the damped random walk on an undirected weighted graph.
 // Transition chance along an edge is proportional to its weight. A node with
 // no remaining weight spreads its rank evenly, which is the usual dangling-node rule.
-func pageRank(weights [][]int) []float64 {
+func pageRank(weights [][]float64) []float64 {
 	n := len(weights)
 	out := make([]float64, n)
 	for i := 0; i < n; i++ {
 		for j := 0; j < n; j++ {
-			out[i] += float64(weights[i][j])
+			out[i] += weights[i][j]
 		}
 	}
 
@@ -177,7 +335,7 @@ func pageRank(weights [][]int) []float64 {
 			row := weights[j]
 			for i := 0; i < n; i++ {
 				if row[i] != 0 {
-					next[i] += scale * float64(row[i])
+					next[i] += scale * row[i]
 				}
 			}
 		}
