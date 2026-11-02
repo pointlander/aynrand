@@ -40,41 +40,49 @@ func main() {
 		before := weights[a][b]
 		beforeRanks := ranks
 
-		setWeight(weights, a, b, before+1)
-		plus := pageRank(weights)
-		plusBoth := raisedBoth(plus, beforeRanks, a, b)
-		if !plusBoth {
+		add := func() bool {
+			setWeight(weights, a, b, before+1)
+			plus := pageRank(weights)
+			plusBoth := raisedBoth(plus, beforeRanks, a, b)
+			if plusBoth {
+				fmt.Println("++++++++++++++++++++++++++++++++++")
+				fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
+				printRanks(plus)
+				ranks = plus
+				return true
+			}
 			setWeight(weights, a, b, before)
-		} else {
-			fmt.Println("++++++++++++++++++++++++++++++++++")
-			fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
-			printRanks(plus)
-			ranks = plus
-			continue
+			return false
 		}
 
-		if before-1 < 1 {
-			//setWeight(weights, a, b, before)
-			//fmt.Printf("step %d nodes %d,%d weight %d restored\n", step, a+1, b+1, before)
-			//printRanks(beforeRanks)
-			continue
-		}
+		subtract := func() bool {
+			if before-1 < 1 {
+				return false
+			}
 
-		setWeight(weights, a, b, before-1)
-		minus := pageRank(weights)
-		minusBoth := raisedBoth(minus, beforeRanks, a, b)
-		if !minusBoth {
+			setWeight(weights, a, b, before-1)
+			minus := pageRank(weights)
+			minusBoth := raisedBoth(minus, beforeRanks, a, b)
+			if minusBoth {
+				fmt.Println("----------------------------------")
+				fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
+				printRanks(minus)
+				ranks = minus
+				return true
+			}
 			setWeight(weights, a, b, before)
-			continue
-		} else {
-			fmt.Println("----------------------------------")
-			fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
-			printRanks(minus)
-			ranks = minus
+			return false
 		}
 
-		//fmt.Printf("step %d nodes %d,%d weight %d restored\n", step, a+1, b+1, before)
-		//printRanks(beforeRanks)
+		if rng.Intn(2) == 0 {
+			if !add() {
+				subtract()
+			}
+		} else {
+			if !subtract() {
+				add()
+			}
+		}
 	}
 }
 
@@ -121,7 +129,6 @@ func raisedBoth(next, prev []float64, a, b int) bool {
 	}
 	bb = -bb
 	return aa < bb
-	//return next[a] > prev[a] && next[b] > prev[b]
 }
 
 func printRanks(ranks []float64) {
