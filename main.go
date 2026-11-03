@@ -9,7 +9,8 @@
 // entropy of PageRank decreases.
 // -s uses float link weights. A proposal adds a standard normal sample to one
 // link and clamps it at 0.1, then rebuilds the coordinates and replaces the
-// other links with those Euclidean distances before PageRank. Node 1 is the origin.
+// other links with those Euclidean distances. PageRank uses e to the minus
+// each weight. Node 1 is the origin.
 package main
 
 import (
@@ -76,7 +77,7 @@ func graphical() {
 		add := func() bool {
 			setWeight(weights, a, b, before+1)
 			plus := pageRank(toFloat(weights))
-			plusBoth := raisedBoth(plus, beforeRanks, a, b)
+			plusBoth := lt(plus, beforeRanks)
 			if plusBoth {
 				fmt.Println("++++++++++++++++++++++++++++++++++")
 				fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
@@ -95,7 +96,7 @@ func graphical() {
 
 			setWeight(weights, a, b, before-1)
 			minus := pageRank(toFloat(weights))
-			minusBoth := raisedBoth(minus, beforeRanks, a, b)
+			minusBoth := lt(minus, beforeRanks)
 			if minusBoth {
 				fmt.Println("----------------------------------")
 				fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
@@ -126,14 +127,14 @@ type point struct {
 // snodgrass graphical model.
 // Weights are floats. A proposal adds one standard normal sample to a link,
 // clamps the result at 0.1, rebuilds the embedding, and writes Euclidean
-// distances back into every other link before PageRank.
+// distances back into every other link. PageRank sees e to the minus each weight.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
-	ranks := pageRank(weights)
+	ranks := pageRank(expMinusWeights(weights))
 
-	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, proposal N(0,1) clamped at %g, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
+	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, proposal N(0,1) clamped at %g, PageRank uses e^-weight, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
@@ -148,8 +149,8 @@ func snodgrass() {
 		nextWeight := proposeSnodgrassWeight(before, sample)
 		setFloatWeight(weights, a, b, nextWeight)
 		points, xNode := syncOtherWeights(weights, a, b)
-		next := pageRank(weights)
-		if raisedBoth(next, beforeRanks, a, b) {
+		next := pageRank(expMinusWeights(weights))
+		if (step&1 == 1 && lt(next, beforeRanks)) || (step&1 == 0 && gt(next, beforeRanks)) {
 			fmt.Printf("step %d nodes %d,%d weight %.6f -> %.6f sample %.6f\n", step, a+1, b+1, before, nextWeight, sample)
 			printRanks(next)
 			printEmbedding(points, xNode)
@@ -163,9 +164,9 @@ func snodgrass() {
 // proposeSnodgrassWeight adds a standard normal sample and keeps the link at least 0.1.
 func proposeSnodgrassWeight(before, sample float64) float64 {
 	next := before + sample
-	if next < snodgrassFloor {
+	/*if next < snodgrassFloor {
 		return snodgrassFloor
-	}
+	}*/
 	return next
 }
 
@@ -200,7 +201,7 @@ func euclidean() {
 		add := func() bool {
 			shiftPair(points, a, b, +1)
 			plus := pageRank(linkWeights(points))
-			if raisedBoth(plus, ranks, a, b) {
+			if lt(plus, ranks) {
 				afterDist := distance(points[a], points[b])
 				fmt.Println("++++++++++++++++++++++++++++++++++")
 				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
@@ -220,7 +221,7 @@ func euclidean() {
 			}
 			shiftPair(points, a, b, -1)
 			minus := pageRank(linkWeights(points))
-			if raisedBoth(minus, ranks, a, b) {
+			if lt(minus, ranks) {
 				afterDist := distance(points[a], points[b])
 				fmt.Println("----------------------------------")
 				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
@@ -312,6 +313,22 @@ func copyWeightsInto(dst, src [][]float64) {
 func setFloatWeight(weights [][]float64, a, b int, value float64) {
 	weights[a][b] = value
 	weights[b][a] = value
+}
+
+// expMinusWeights returns e to the minus each off-diagonal weight.
+func expMinusWeights(weights [][]float64) [][]float64 {
+	out := make([][]float64, len(weights))
+	for i := range weights {
+		out[i] = make([]float64, len(weights[i]))
+		for j := range weights[i] {
+			if i == j || weights[i][j] == 0 {
+				continue
+			}
+			//out[i][j] = math.Exp(-weights[i][j])
+			out[i][j] = 1 / (weights[i][j] * weights[i][j])
+		}
+	}
+	return out
 }
 
 // triangulate embeds each node from the link weights, using a local frame
@@ -630,7 +647,7 @@ func setWeight(weights [][]int, a, b, value int) {
 	weights[b][a] = value
 }
 
-func raisedBoth(next, prev []float64, a, b int) bool {
+func lt(next, prev []float64) bool {
 	aa := 0.0
 	for _, value := range next {
 		aa += value * math.Log(value)
@@ -642,6 +659,20 @@ func raisedBoth(next, prev []float64, a, b int) bool {
 	}
 	bb = -bb
 	return aa < bb
+}
+
+func gt(next, prev []float64) bool {
+	aa := 0.0
+	for _, value := range next {
+		aa += value * math.Log(value)
+	}
+	aa = -aa
+	bb := 0.0
+	for _, value := range prev {
+		bb += value * math.Log(value)
+	}
+	bb = -bb
+	return aa > bb
 }
 
 func printRanks(ranks []float64) {
