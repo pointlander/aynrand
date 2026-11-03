@@ -7,9 +7,9 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s uses float link weights. Setting one link rebuilds the coordinates and
-// replaces the other links with those Euclidean distances before PageRank.
-// Node 1 is the origin.
+// -s uses float link weights. A proposal adds a standard normal sample to one
+// link and clamps it at 0.1, then rebuilds the coordinates and replaces the
+// other links with those Euclidean distances before PageRank. Node 1 is the origin.
 package main
 
 import (
@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	minWeight = 1
-	maxWeight = 33
-	damping   = 0.85
-	tolerance = 1e-15
-	maxIter   = 10000
+	minWeight      = 1
+	maxWeight      = 33
+	damping        = 0.85
+	snodgrassFloor = 0.1
+	tolerance      = 1e-15
+	maxIter        = 10000
 )
 
 var nodeCount = 33
@@ -123,15 +124,16 @@ type point struct {
 }
 
 // snodgrass graphical model.
-// Weights are floats. A proposal sets one link, rebuilds the embedding, and
-// writes Euclidean distances back into every other link before PageRank.
+// Weights are floats. A proposal adds one standard normal sample to a link,
+// clamps the result at 0.1, rebuilds the embedding, and writes Euclidean
+// distances back into every other link before PageRank.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
 	ranks := pageRank(weights)
 
-	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, proposal N(0,1) clamped at %g, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
@@ -142,54 +144,29 @@ func snodgrass() {
 		beforeRanks := ranks
 		saved := cloneWeights(weights)
 
-		add := func() bool {
-			setFloatWeight(weights, a, b, before+1)
-			points, xNode := syncOtherWeights(weights, a, b)
-			plus := pageRank(weights)
-			plusBoth := raisedBoth(plus, beforeRanks, a, b)
-			if plusBoth {
-				fmt.Println("++++++++++++++++++++++++++++++++++")
-				fmt.Printf("step %d nodes %d,%d +1 weight %.6f -> %.6f both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
-				printRanks(plus)
-				printEmbedding(points, xNode)
-				ranks = plus
-				return true
-			}
-			copyWeightsInto(weights, saved)
-			return false
+		sample := rng.NormFloat64()
+		nextWeight := proposeSnodgrassWeight(before, sample)
+		setFloatWeight(weights, a, b, nextWeight)
+		points, xNode := syncOtherWeights(weights, a, b)
+		next := pageRank(weights)
+		if raisedBoth(next, beforeRanks, a, b) {
+			fmt.Printf("step %d nodes %d,%d weight %.6f -> %.6f sample %.6f\n", step, a+1, b+1, before, nextWeight, sample)
+			printRanks(next)
+			printEmbedding(points, xNode)
+			ranks = next
+			continue
 		}
-
-		subtract := func() bool {
-			if before-1 < 1 {
-				return false
-			}
-
-			setFloatWeight(weights, a, b, before-1)
-			points, xNode := syncOtherWeights(weights, a, b)
-			minus := pageRank(weights)
-			minusBoth := raisedBoth(minus, beforeRanks, a, b)
-			if minusBoth {
-				fmt.Println("----------------------------------")
-				fmt.Printf("step %d nodes %d,%d -1 weight %.6f -> %.6f both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
-				printRanks(minus)
-				printEmbedding(points, xNode)
-				ranks = minus
-				return true
-			}
-			copyWeightsInto(weights, saved)
-			return false
-		}
-
-		if rng.Intn(2) == 0 {
-			if !add() {
-				subtract()
-			}
-		} else {
-			if !subtract() {
-				add()
-			}
-		}
+		copyWeightsInto(weights, saved)
 	}
+}
+
+// proposeSnodgrassWeight adds a standard normal sample and keeps the link at least 0.1.
+func proposeSnodgrassWeight(before, sample float64) float64 {
+	next := before + sample
+	if next < snodgrassFloor {
+		return snodgrassFloor
+	}
+	return next
 }
 
 // euclidean is the graphical model with each node placed in R^3.
