@@ -7,8 +7,8 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s is the integer-weight search. Each node also gets a 3D point from
-// trilateration of those weights, with node 1 held at the origin.
+// -s is the integer-weight search. Each node gets a 3D point by trilateration
+// from its nearest already placed neighbors. Node 1 is the origin.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 )
 
 const (
@@ -122,7 +123,7 @@ type point struct {
 
 // snodgrass graphical model.
 // Link weights stay the integer search state. Coordinates are rebuilt from
-// those weights by trilateration whenever they are shown.
+// those weights by nearest-neighbor trilateration whenever they are shown.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
@@ -279,60 +280,207 @@ func distance(p, q point) float64 {
 }
 
 func reportCoordinates(weights [][]int) {
-	points, anchor := triangulate(toFloat(weights))
-	if anchor < 2 {
-		fmt.Println("coordinates by triangulation, node 1 at the origin, basis 1,2")
+	points, xNode := triangulate(toFloat(weights))
+	if xNode <= 0 {
+		fmt.Println("coordinates by nearest-point trilateration, node 1 at the origin")
 	} else {
-		fmt.Printf("coordinates by triangulation, node 1 at the origin, basis 1,2,%d\n", anchor+1)
+		fmt.Printf("coordinates by nearest-point trilateration, node 1 at the origin, node %d on the x-axis\n", xNode+1)
 	}
 	printPoints(points)
 }
 
-// triangulate embeds each node in R^3 from pairwise distances.
-// Node 0 is the origin and node 1 lies on the positive x-axis. The third
-// basis node is the one farthest from that axis, placed in the xy-plane
-// with positive y. Every other node is trilaterated from those three, on
-// the positive-z side of their plane.
+// triangulate embeds each node from the link weights, using a local frame
+// at every step. Node 0 is the origin. Its nearest neighbor lies on the
+// positive x-axis, and the nearest remaining node that makes a triangle
+// with those two lies in the xy-plane. Each later node is the unplaced node
+// closest to the placed set, and it is trilaterated from its three nearest
+// placed nodes. A fourth nearest node picks which side of that plane it
+// lands on.
 func triangulate(weights [][]float64) ([]point, int) {
 	n := len(weights)
 	points := make([]point, n)
 	if n < 2 {
 		return points, 0
 	}
-	d01 := weights[0][1]
+
+	xNode := nearestIndex(weights[0], 0)
+	d01 := weights[0][xNode]
 	if d01 == 0 {
 		d01 = 1
 	}
-	points[1] = point{x: d01}
+	points[xNode] = point{x: d01}
 	if n < 3 {
-		return points, 1
+		return points, xNode
 	}
 
-	anchor := 2
-	bestY := 0.0
-	best := placeInPlane(weights[0][2], weights[1][2], d01)
-	for k := 2; k < n; k++ {
-		p := placeInPlane(weights[0][k], weights[1][k], d01)
-		if p.y > bestY {
-			bestY = p.y
-			anchor = k
-			best = p
+	placed := make([]bool, n)
+	placed[0] = true
+	placed[xNode] = true
+
+	third := -1
+	order := nodesByNearness(weights, placed)
+	for _, k := range order {
+		p := placeInPlane(weights[0][k], weights[xNode][k], d01)
+		if p.y > 0 {
+			points[k] = p
+			third = k
+			break
 		}
 	}
-	points[anchor] = best
-	if bestY == 0 {
-		for i := 2; i < n; i++ {
-			points[i] = placeInPlane(weights[0][i], weights[1][i], d01)
+	if third < 0 {
+		for i := 1; i < n; i++ {
+			if i == xNode {
+				continue
+			}
+			points[i] = placeInPlane(weights[0][i], weights[xNode][i], d01)
 		}
-		return points, anchor
+		return points, xNode
 	}
-	for i := 2; i < n; i++ {
-		if i == anchor {
+	placed[third] = true
+
+	for placedCount := 3; placedCount < n; placedCount++ {
+		i := closestUnplaced(weights, placed)
+		refs := localReferences(i, placed, points, weights)
+		p1, p2 := refs[0], refs[1]
+		if len(refs) < 3 {
+			points[i] = trilaterate(points[p1], points[p2], points[p2], weights[i][p1], weights[i][p2], weights[i][p2], +1)
+			placed[i] = true
 			continue
 		}
-		points[i] = trilaterate(points[0], points[1], points[anchor], weights[0][i], weights[1][i], weights[anchor][i])
+		p3 := refs[2]
+		plus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], +1)
+		if len(refs) < 4 {
+			points[i] = plus
+		} else {
+			minus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], -1)
+			fourth := refs[3]
+			want := weights[i][fourth]
+			errPlus := math.Abs(distance(plus, points[fourth]) - want)
+			errMinus := math.Abs(distance(minus, points[fourth]) - want)
+			if errPlus <= errMinus {
+				points[i] = plus
+			} else {
+				points[i] = minus
+			}
+		}
+		placed[i] = true
 	}
-	return points, anchor
+	return points, xNode
+}
+
+// nearestIndex returns the index other than skip with the smallest weight.
+// Ties take the smaller index.
+func nearestIndex(row []float64, skip int) int {
+	best := -1
+	for j := range row {
+		if j == skip {
+			continue
+		}
+		if best < 0 || row[j] < row[best] || (row[j] == row[best] && j < best) {
+			best = j
+		}
+	}
+	return best
+}
+
+// nodesByNearness lists unplaced nodes by distance to the closest placed node.
+func nodesByNearness(weights [][]float64, placed []bool) []int {
+	type nearNode struct {
+		i int
+		d float64
+	}
+	nodes := make([]nearNode, 0, len(placed))
+	for i := range placed {
+		if placed[i] {
+			continue
+		}
+		d := math.Inf(1)
+		for j := range placed {
+			if placed[j] && weights[i][j] < d {
+				d = weights[i][j]
+			}
+		}
+		nodes = append(nodes, nearNode{i: i, d: d})
+	}
+	sort.Slice(nodes, func(a, b int) bool {
+		if nodes[a].d != nodes[b].d {
+			return nodes[a].d < nodes[b].d
+		}
+		return nodes[a].i < nodes[b].i
+	})
+	order := make([]int, len(nodes))
+	for i, node := range nodes {
+		order[i] = node.i
+	}
+	return order
+}
+
+func closestUnplaced(weights [][]float64, placed []bool) int {
+	order := nodesByNearness(weights, placed)
+	return order[0]
+}
+
+// localReferences returns the two nearest placed nodes, then the nearest
+// further node that is not collinear with them, then one more nearest node
+// used to choose the side of that plane.
+func localReferences(i int, placed []bool, points []point, weights [][]float64) []int {
+	order := nearestPlaced(i, placed, weights, len(placed))
+	if len(order) < 2 {
+		return order
+	}
+	p1, p2 := order[0], order[1]
+	refs := []int{p1, p2}
+	for _, k := range order[2:] {
+		if lineHeight(points[p1], points[p2], points[k]) >= 1e-6 {
+			refs = append(refs, k)
+			break
+		}
+	}
+	chosen := map[int]bool{p1: true, p2: true}
+	if len(refs) == 3 {
+		chosen[refs[2]] = true
+	}
+	for _, k := range order {
+		if !chosen[k] {
+			refs = append(refs, k)
+			break
+		}
+	}
+	return refs
+}
+
+func lineHeight(a, b, c point) float64 {
+	abx, aby, abz := b.x-a.x, b.y-a.y, b.z-a.z
+	acx, acy, acz := c.x-a.x, c.y-a.y, c.z-a.z
+	cx := aby*acz - abz*acy
+	cy := abz*acx - abx*acz
+	cz := abx*acy - aby*acx
+	ab := math.Hypot(abx, math.Hypot(aby, abz))
+	if ab == 0 {
+		return 0
+	}
+	return math.Hypot(cx, math.Hypot(cy, cz)) / ab
+}
+
+// nearestPlaced returns up to k placed nodes closest to i.
+func nearestPlaced(i int, placed []bool, weights [][]float64, k int) []int {
+	idx := make([]int, 0, len(placed))
+	for j := range placed {
+		if placed[j] {
+			idx = append(idx, j)
+		}
+	}
+	sort.Slice(idx, func(a, b int) bool {
+		da, db := weights[i][idx[a]], weights[i][idx[b]]
+		if da != db {
+			return da < db
+		}
+		return idx[a] < idx[b]
+	})
+	if len(idx) > k {
+		idx = idx[:k]
+	}
+	return idx
 }
 
 // placeInPlane lays a point in the xy-plane given its distances to the
@@ -351,8 +499,8 @@ func placeInPlane(d0, d1, d01 float64) point {
 }
 
 // trilaterate returns the point at the given distances from p1, p2, and p3.
-// The z coordinate is taken non-negative in the plane's right-handed frame.
-func trilaterate(p1, p2, p3 point, r1, r2, r3 float64) point {
+// sign selects the side of their plane: +1 is the right-handed side.
+func trilaterate(p1, p2, p3 point, r1, r2, r3, sign float64) point {
 	d := distance(p1, p2)
 	if d == 0 {
 		return point{x: p1.x + r1, y: p1.y, z: p1.z}
@@ -375,7 +523,15 @@ func trilaterate(p1, p2, p3 point, r1, r2, r3 float64) point {
 	y := (r1*r1-r3*r3+i*i+j*j)/(2*j) - (i/j)*x
 	z := 0.0
 	if z2 := r1*r1 - x*x - y*y; z2 > 0 {
-		z = math.Sqrt(z2)
+		z = sign * math.Sqrt(z2)
+	} else if r1 > 0 {
+		// The spheres miss. Stay on the nearest sphere instead of extrapolating.
+		rad := math.Hypot(x, y)
+		if rad > 0 {
+			scale := r1 / rad
+			x *= scale
+			y *= scale
+		}
 	}
 	return point{
 		x: p1.x + x*ex.x + y*ey.x + z*ez.x,
