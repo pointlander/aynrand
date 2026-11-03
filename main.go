@@ -42,6 +42,7 @@ var (
 	bfFloor   = mustBF("0.1")
 	bfTol     = mustBF(tolerance)
 	bfFlat    = mustBF("1e-6")
+	bfG       = mustBF("6.6743e-11")
 	ln2       = mustBF("0.693147180559945309417232121458176568075500134360255254120680009493393621969694715605863326996418687")
 )
 
@@ -353,7 +354,7 @@ func expMinusWeights(weights [][]*big.Float) [][]*big.Float {
 				continue
 			}
 			//out[i][j] = bfExp(bfNeg(weights[i][j]))
-			out[i][j] = bfQuo(bfOne, bfMul(weights[i][j], weights[i][j]))
+			out[i][j] = bfQuo(bfG, bfMul(weights[i][j], weights[i][j]))
 		}
 	}
 	return out
