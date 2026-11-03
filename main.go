@@ -57,7 +57,6 @@ var (
 func main() {
 	flag.Parse()
 	if *FlagEuclidean {
-		nodeCount *= 10
 		euclidean()
 		return
 	}
