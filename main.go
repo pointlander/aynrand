@@ -7,16 +7,17 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s uses float link weights. A proposal adds a standard normal sample to one
-// link and clamps it at 0.1, then rebuilds the coordinates and replaces the
-// other links with those Euclidean distances. PageRank uses e to the minus
-// each weight. Node 1 is the origin.
+// -s uses big.Float link weights. A proposal adds a standard normal sample to
+// one link and clamps it at 0.1, then rebuilds the coordinates and replaces the
+// other links with those Euclidean distances. PageRank uses the inverse square
+// of each weight. Node 1 is the origin.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"math"
+	"math/big"
 	"math/rand"
 	"sort"
 )
@@ -26,11 +27,23 @@ const (
 	maxWeight      = 33
 	damping        = 0.85
 	snodgrassFloor = 0.1
-	tolerance      = 1e-15
+	tolerance      = "1e-15"
 	maxIter        = 10000
+	prec           = 256
 )
 
 var nodeCount = 33
+
+var (
+	bfZero    = mustBF("0")
+	bfOne     = mustBF("1")
+	bfTwo     = mustBF("2")
+	bfDamping = mustBF("0.85")
+	bfFloor   = mustBF("0.1")
+	bfTol     = mustBF(tolerance)
+	bfFlat    = mustBF("1e-6")
+	ln2       = mustBF("0.693147180559945309417232121458176568075500134360255254120680009493393621969694715605863326996418687")
+)
 
 var (
 	// FlagGraphical graphical model
@@ -121,37 +134,46 @@ func graphical() {
 }
 
 type point struct {
-	x, y, z float64
+	x, y, z *big.Float
+}
+
+func (p point) clone() point {
+	return point{bfCopy(p.x), bfCopy(p.y), bfCopy(p.z)}
+}
+
+func originPoint() point {
+	return point{newFloat(0), newFloat(0), newFloat(0)}
 }
 
 // snodgrass graphical model.
-// Weights are floats. A proposal adds one standard normal sample to a link,
-// clamps the result at 0.1, rebuilds the embedding, and writes Euclidean
-// distances back into every other link. PageRank sees e to the minus each weight.
+// Weights are big.Float values. A proposal adds one standard normal sample to
+// a link, clamps the result at 0.1, rebuilds the embedding, and writes
+// Euclidean distances back into every other link. PageRank sees the inverse
+// square of each weight.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
 	ranks := pageRank(expMinusWeights(weights))
 
-	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, proposal N(0,1) clamped at %g, PageRank uses e^-weight, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
+	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, proposal N(0,1) clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
 
 	for step := 1; ; step++ {
 		a, b := randomPair(rng)
-		before := weights[a][b]
+		before := bfCopy(weights[a][b])
 		beforeRanks := ranks
 		saved := cloneWeights(weights)
 
-		sample := rng.NormFloat64()
+		sample := newFloat(rng.NormFloat64())
 		nextWeight := proposeSnodgrassWeight(before, sample)
 		setFloatWeight(weights, a, b, nextWeight)
 		points, xNode := syncOtherWeights(weights, a, b)
 		next := pageRank(expMinusWeights(weights))
 		if lt(next, beforeRanks) {
-			fmt.Printf("step %d nodes %d,%d weight %.6f -> %.6f sample %.6f\n", step, a+1, b+1, before, nextWeight, sample)
+			fmt.Printf("step %d nodes %d,%d weight %s -> %s sample %s\n", step, a+1, b+1, before.Text('f', 6), nextWeight.Text('f', 6), sample.Text('f', 6))
 			printRanks(next)
 			printEmbedding(points, xNode)
 			ranks = next
@@ -162,10 +184,10 @@ func snodgrass() {
 }
 
 // proposeSnodgrassWeight adds a standard normal sample and keeps the link at least 0.1.
-func proposeSnodgrassWeight(before, sample float64) float64 {
-	next := before + sample
-	if next < snodgrassFloor {
-		return snodgrassFloor
+func proposeSnodgrassWeight(before, sample *big.Float) *big.Float {
+	next := bfAdd(before, sample)
+	if next.Cmp(bfFloor) < 0 {
+		return bfCopy(bfFloor)
 	}
 	return next
 }
@@ -178,12 +200,13 @@ func euclidean() {
 	rng := rand.New(rand.NewSource(1))
 
 	points := make([]point, nodeCount)
-	span := float64(maxWeight - minWeight)
+	span := newInt(int64(maxWeight - minWeight))
+	floor := newInt(int64(minWeight))
 	for i := range points {
 		points[i] = point{
-			x: float64(minWeight) + rng.Float64()*span,
-			y: float64(minWeight) + rng.Float64()*span,
-			z: float64(minWeight) + rng.Float64()*span,
+			x: bfAdd(floor, bfMul(newFloat(rng.Float64()), span)),
+			y: bfAdd(floor, bfMul(newFloat(rng.Float64()), span)),
+			z: bfAdd(floor, bfMul(newFloat(rng.Float64()), span)),
 		}
 	}
 	ranks := pageRank(linkWeights(points))
@@ -195,16 +218,16 @@ func euclidean() {
 
 	for step := 1; ; step++ {
 		a, b := randomPair(rng)
-		pa, pb := points[a], points[b]
+		pa, pb := points[a].clone(), points[b].clone()
 		beforeDist := distance(pa, pb)
 
 		add := func() bool {
-			shiftPair(points, a, b, +1)
+			shiftPair(points, a, b, bfOne)
 			plus := pageRank(linkWeights(points))
 			if lt(plus, ranks) {
 				afterDist := distance(points[a], points[b])
 				fmt.Println("++++++++++++++++++++++++++++++++++")
-				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
+				fmt.Printf("step %d nodes %d,%d distance %s -> %s weight %s -> %s\n", step, a+1, b+1, beforeDist.Text('f', 6), afterDist.Text('f', 6), bfExp(bfNeg(beforeDist)).Text('e', 6), bfExp(bfNeg(afterDist)).Text('e', 6))
 				printPoint(a, points[a])
 				printPoint(b, points[b])
 				printRanks(plus)
@@ -216,15 +239,15 @@ func euclidean() {
 		}
 
 		subtract := func() bool {
-			if beforeDist-1 < 1 {
+			if bfSub(beforeDist, bfOne).Cmp(bfOne) < 0 {
 				return false
 			}
-			shiftPair(points, a, b, -1)
+			shiftPair(points, a, b, bfNeg(bfOne))
 			minus := pageRank(linkWeights(points))
 			if lt(minus, ranks) {
 				afterDist := distance(points[a], points[b])
 				fmt.Println("----------------------------------")
-				fmt.Printf("step %d nodes %d,%d distance %.6f -> %.6f weight %.6e -> %.6e\n", step, a+1, b+1, beforeDist, afterDist, math.Exp(-beforeDist), math.Exp(-afterDist))
+				fmt.Printf("step %d nodes %d,%d distance %s -> %s weight %s -> %s\n", step, a+1, b+1, beforeDist.Text('f', 6), afterDist.Text('f', 6), bfExp(bfNeg(beforeDist)).Text('e', 6), bfExp(bfNeg(afterDist)).Text('e', 6))
 				printPoint(a, points[a])
 				printPoint(b, points[b])
 				printRanks(minus)
@@ -254,14 +277,14 @@ func printPoints(points []point) {
 }
 
 func printPoint(i int, p point) {
-	fmt.Printf("node %d x:%.6f y:%.6f z:%.6f\n", i+1, p.x, p.y, p.z)
+	fmt.Printf("node %d x:%s y:%s z:%s\n", i+1, p.x.Text('f', 6), p.y.Text('f', 6), p.z.Text('f', 6))
 }
 
-func distance(p, q point) float64 {
-	return math.Hypot(p.x-q.x, math.Hypot(p.y-q.y, p.z-q.z))
+func distance(p, q point) *big.Float {
+	return bfHypot3(bfSub(p.x, q.x), bfSub(p.y, q.y), bfSub(p.z, q.z))
 }
 
-func reportCoordinates(weights [][]float64) {
+func reportCoordinates(weights [][]*big.Float) {
 	points, xNode := triangulate(weights)
 	printEmbedding(points, xNode)
 }
@@ -278,7 +301,7 @@ func printEmbedding(points []point, xNode int) {
 // syncOtherWeights embeds weights, then sets every edge except keepA-keepB
 // to the Euclidean distance of that embedding. The kept edge is the one
 // just edited. PageRank runs after this returns.
-func syncOtherWeights(weights [][]float64, keepA, keepB int) ([]point, int) {
+func syncOtherWeights(weights [][]*big.Float, keepA, keepB int) ([]point, int) {
 	if keepA > keepB {
 		keepA, keepB = keepB, keepA
 	}
@@ -290,42 +313,48 @@ func syncOtherWeights(weights [][]float64, keepA, keepB int) ([]point, int) {
 			}
 			d := distance(points[i], points[j])
 			weights[i][j] = d
-			weights[j][i] = d
+			weights[j][i] = bfCopy(d)
 		}
 	}
 	return points, xNode
 }
 
-func cloneWeights(weights [][]float64) [][]float64 {
-	out := make([][]float64, len(weights))
+func cloneWeights(weights [][]*big.Float) [][]*big.Float {
+	out := make([][]*big.Float, len(weights))
 	for i := range weights {
-		out[i] = append([]float64(nil), weights[i]...)
+		out[i] = make([]*big.Float, len(weights[i]))
+		for j := range weights[i] {
+			out[i][j] = bfCopy(weights[i][j])
+		}
 	}
 	return out
 }
 
-func copyWeightsInto(dst, src [][]float64) {
+func copyWeightsInto(dst, src [][]*big.Float) {
 	for i := range dst {
-		copy(dst[i], src[i])
+		for j := range dst[i] {
+			dst[i][j] = bfCopy(src[i][j])
+		}
 	}
 }
 
-func setFloatWeight(weights [][]float64, a, b int, value float64) {
-	weights[a][b] = value
-	weights[b][a] = value
+func setFloatWeight(weights [][]*big.Float, a, b int, value *big.Float) {
+	weights[a][b] = bfCopy(value)
+	weights[b][a] = bfCopy(value)
 }
 
-// expMinusWeights returns e to the minus each off-diagonal weight.
-func expMinusWeights(weights [][]float64) [][]float64 {
-	out := make([][]float64, len(weights))
+// expMinusWeights returns the inverse square of each off-diagonal weight.
+func expMinusWeights(weights [][]*big.Float) [][]*big.Float {
+	out := make([][]*big.Float, len(weights))
 	for i := range weights {
-		out[i] = make([]float64, len(weights[i]))
+		out[i] = make([]*big.Float, len(weights[i]))
 		for j := range weights[i] {
-			if i == j || weights[i][j] == 0 {
+			if i == j || weights[i][j].Sign() == 0 {
+				out[i][j] = newFloat(0)
 				continue
 			}
-			//out[i][j] = math.Exp(-weights[i][j])
-			out[i][j] = 1 / (weights[i][j] * weights[i][j])
+			//out[i][j] = bfExp(bfNeg(weights[i][j]))
+			out[i][j] = bfQuo(bfOne, bfMul(weights[i][j], weights[i][j]))
 		}
 	}
 	return out
@@ -338,19 +367,22 @@ func expMinusWeights(weights [][]float64) [][]float64 {
 // closest to the placed set, and it is trilaterated from its three nearest
 // placed nodes. A fourth nearest node picks which side of that plane it
 // lands on.
-func triangulate(weights [][]float64) ([]point, int) {
+func triangulate(weights [][]*big.Float) ([]point, int) {
 	n := len(weights)
 	points := make([]point, n)
+	for i := range points {
+		points[i] = originPoint()
+	}
 	if n < 2 {
 		return points, 0
 	}
 
 	xNode := nearestIndex(weights[0], 0)
-	d01 := weights[0][xNode]
-	if d01 == 0 {
-		d01 = 1
+	d01 := bfCopy(weights[0][xNode])
+	if d01.Sign() == 0 {
+		d01 = bfCopy(bfOne)
 	}
-	points[xNode] = point{x: d01}
+	points[xNode] = point{x: bfCopy(d01), y: newFloat(0), z: newFloat(0)}
 	if n < 3 {
 		return points, xNode
 	}
@@ -363,7 +395,7 @@ func triangulate(weights [][]float64) ([]point, int) {
 	order := nodesByNearness(weights, placed)
 	for _, k := range order {
 		p := placeInPlane(weights[0][k], weights[xNode][k], d01)
-		if p.y > 0 {
+		if p.y.Sign() > 0 {
 			points[k] = p
 			third = k
 			break
@@ -385,21 +417,21 @@ func triangulate(weights [][]float64) ([]point, int) {
 		refs := localReferences(i, placed, points, weights)
 		p1, p2 := refs[0], refs[1]
 		if len(refs) < 3 {
-			points[i] = trilaterate(points[p1], points[p2], points[p2], weights[i][p1], weights[i][p2], weights[i][p2], +1)
+			points[i] = trilaterate(points[p1], points[p2], points[p2], weights[i][p1], weights[i][p2], weights[i][p2], bfOne)
 			placed[i] = true
 			continue
 		}
 		p3 := refs[2]
-		plus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], +1)
+		plus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], bfOne)
 		if len(refs) < 4 {
 			points[i] = plus
 		} else {
-			minus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], -1)
+			minus := trilaterate(points[p1], points[p2], points[p3], weights[i][p1], weights[i][p2], weights[i][p3], bfNeg(bfOne))
 			fourth := refs[3]
 			want := weights[i][fourth]
-			errPlus := math.Abs(distance(plus, points[fourth]) - want)
-			errMinus := math.Abs(distance(minus, points[fourth]) - want)
-			if errPlus <= errMinus {
+			errPlus := bfAbs(bfSub(distance(plus, points[fourth]), want))
+			errMinus := bfAbs(bfSub(distance(minus, points[fourth]), want))
+			if errPlus.Cmp(errMinus) <= 0 {
 				points[i] = plus
 			} else {
 				points[i] = minus
@@ -412,13 +444,13 @@ func triangulate(weights [][]float64) ([]point, int) {
 
 // nearestIndex returns the index other than skip with the smallest weight.
 // Ties take the smaller index.
-func nearestIndex(row []float64, skip int) int {
+func nearestIndex(row []*big.Float, skip int) int {
 	best := -1
 	for j := range row {
 		if j == skip {
 			continue
 		}
-		if best < 0 || row[j] < row[best] || (row[j] == row[best] && j < best) {
+		if best < 0 || row[j].Cmp(row[best]) < 0 || (row[j].Cmp(row[best]) == 0 && j < best) {
 			best = j
 		}
 	}
@@ -426,27 +458,31 @@ func nearestIndex(row []float64, skip int) int {
 }
 
 // nodesByNearness lists unplaced nodes by distance to the closest placed node.
-func nodesByNearness(weights [][]float64, placed []bool) []int {
+func nodesByNearness(weights [][]*big.Float, placed []bool) []int {
 	type nearNode struct {
 		i int
-		d float64
+		d *big.Float
 	}
 	nodes := make([]nearNode, 0, len(placed))
 	for i := range placed {
 		if placed[i] {
 			continue
 		}
-		d := math.Inf(1)
+		var d *big.Float
 		for j := range placed {
-			if placed[j] && weights[i][j] < d {
+			if !placed[j] {
+				continue
+			}
+			if d == nil || weights[i][j].Cmp(d) < 0 {
 				d = weights[i][j]
 			}
 		}
 		nodes = append(nodes, nearNode{i: i, d: d})
 	}
 	sort.Slice(nodes, func(a, b int) bool {
-		if nodes[a].d != nodes[b].d {
-			return nodes[a].d < nodes[b].d
+		cmp := nodes[a].d.Cmp(nodes[b].d)
+		if cmp != 0 {
+			return cmp < 0
 		}
 		return nodes[a].i < nodes[b].i
 	})
@@ -457,7 +493,7 @@ func nodesByNearness(weights [][]float64, placed []bool) []int {
 	return order
 }
 
-func closestUnplaced(weights [][]float64, placed []bool) int {
+func closestUnplaced(weights [][]*big.Float, placed []bool) int {
 	order := nodesByNearness(weights, placed)
 	return order[0]
 }
@@ -465,7 +501,7 @@ func closestUnplaced(weights [][]float64, placed []bool) int {
 // localReferences returns the two nearest placed nodes, then the nearest
 // further node that is not collinear with them, then one more nearest node
 // used to choose the side of that plane.
-func localReferences(i int, placed []bool, points []point, weights [][]float64) []int {
+func localReferences(i int, placed []bool, points []point, weights [][]*big.Float) []int {
 	order := nearestPlaced(i, placed, weights, len(placed))
 	if len(order) < 2 {
 		return order
@@ -473,7 +509,7 @@ func localReferences(i int, placed []bool, points []point, weights [][]float64) 
 	p1, p2 := order[0], order[1]
 	refs := []int{p1, p2}
 	for _, k := range order[2:] {
-		if lineHeight(points[p1], points[p2], points[k]) >= 1e-6 {
+		if lineHeight(points[p1], points[p2], points[k]).Cmp(bfFlat) >= 0 {
 			refs = append(refs, k)
 			break
 		}
@@ -491,21 +527,21 @@ func localReferences(i int, placed []bool, points []point, weights [][]float64) 
 	return refs
 }
 
-func lineHeight(a, b, c point) float64 {
-	abx, aby, abz := b.x-a.x, b.y-a.y, b.z-a.z
-	acx, acy, acz := c.x-a.x, c.y-a.y, c.z-a.z
-	cx := aby*acz - abz*acy
-	cy := abz*acx - abx*acz
-	cz := abx*acy - aby*acx
-	ab := math.Hypot(abx, math.Hypot(aby, abz))
-	if ab == 0 {
-		return 0
+func lineHeight(a, b, c point) *big.Float {
+	abx, aby, abz := bfSub(b.x, a.x), bfSub(b.y, a.y), bfSub(b.z, a.z)
+	acx, acy, acz := bfSub(c.x, a.x), bfSub(c.y, a.y), bfSub(c.z, a.z)
+	cx := bfSub(bfMul(aby, acz), bfMul(abz, acy))
+	cy := bfSub(bfMul(abz, acx), bfMul(abx, acz))
+	cz := bfSub(bfMul(abx, acy), bfMul(aby, acx))
+	ab := bfHypot3(abx, aby, abz)
+	if ab.Sign() == 0 {
+		return newFloat(0)
 	}
-	return math.Hypot(cx, math.Hypot(cy, cz)) / ab
+	return bfQuo(bfHypot3(cx, cy, cz), ab)
 }
 
 // nearestPlaced returns up to k placed nodes closest to i.
-func nearestPlaced(i int, placed []bool, weights [][]float64, k int) []int {
+func nearestPlaced(i int, placed []bool, weights [][]*big.Float, k int) []int {
 	idx := make([]int, 0, len(placed))
 	for j := range placed {
 		if placed[j] {
@@ -513,9 +549,9 @@ func nearestPlaced(i int, placed []bool, weights [][]float64, k int) []int {
 		}
 	}
 	sort.Slice(idx, func(a, b int) bool {
-		da, db := weights[i][idx[a]], weights[i][idx[b]]
-		if da != db {
-			return da < db
+		cmp := weights[i][idx[a]].Cmp(weights[i][idx[b]])
+		if cmp != 0 {
+			return cmp < 0
 		}
 		return idx[a] < idx[b]
 	})
@@ -527,70 +563,86 @@ func nearestPlaced(i int, placed []bool, weights [][]float64, k int) []int {
 
 // placeInPlane lays a point in the xy-plane given its distances to the
 // origin and to a point at (d01, 0, 0). y is zero when the two circles miss.
-func placeInPlane(d0, d1, d01 float64) point {
-	if d01 == 0 {
-		return point{x: d0}
+func placeInPlane(d0, d1, d01 *big.Float) point {
+	if d01.Sign() == 0 {
+		return point{x: bfCopy(d0), y: newFloat(0), z: newFloat(0)}
 	}
-	x := (d01*d01 + d0*d0 - d1*d1) / (2 * d01)
-	y2 := d0*d0 - x*x
-	y := 0.0
-	if y2 > 0 {
-		y = math.Sqrt(y2)
+	num := bfAdd(bfMul(d01, d01), bfSub(bfMul(d0, d0), bfMul(d1, d1)))
+	x := bfQuo(num, bfMul(bfTwo, d01))
+	y2 := bfSub(bfMul(d0, d0), bfMul(x, x))
+	y := newFloat(0)
+	if y2.Sign() > 0 {
+		y = bfSqrt(y2)
 	}
-	return point{x: x, y: y}
+	return point{x: x, y: y, z: newFloat(0)}
 }
 
 // trilaterate returns the point at the given distances from p1, p2, and p3.
 // sign selects the side of their plane: +1 is the right-handed side.
-func trilaterate(p1, p2, p3 point, r1, r2, r3, sign float64) point {
+func trilaterate(p1, p2, p3 point, r1, r2, r3, sign *big.Float) point {
 	d := distance(p1, p2)
-	if d == 0 {
-		return point{x: p1.x + r1, y: p1.y, z: p1.z}
+	if d.Sign() == 0 {
+		return point{x: bfAdd(p1.x, r1), y: bfCopy(p1.y), z: bfCopy(p1.z)}
 	}
-	ex := point{(p2.x - p1.x) / d, (p2.y - p1.y) / d, (p2.z - p1.z) / d}
-	vx, vy, vz := p3.x-p1.x, p3.y-p1.y, p3.z-p1.z
-	i := ex.x*vx + ex.y*vy + ex.z*vz
-	tx, ty, tz := vx-i*ex.x, vy-i*ex.y, vz-i*ex.z
-	j := math.Hypot(tx, math.Hypot(ty, tz))
-	if j == 0 {
-		return point{x: p1.x + ex.x*r1, y: p1.y + ex.y*r1, z: p1.z + ex.z*r1}
+	ex := point{
+		x: bfQuo(bfSub(p2.x, p1.x), d),
+		y: bfQuo(bfSub(p2.y, p1.y), d),
+		z: bfQuo(bfSub(p2.z, p1.z), d),
 	}
-	ey := point{tx / j, ty / j, tz / j}
+	v := point{x: bfSub(p3.x, p1.x), y: bfSub(p3.y, p1.y), z: bfSub(p3.z, p1.z)}
+	i := bfDot(ex, v)
+	t := point{
+		x: bfSub(v.x, bfMul(i, ex.x)),
+		y: bfSub(v.y, bfMul(i, ex.y)),
+		z: bfSub(v.z, bfMul(i, ex.z)),
+	}
+	j := bfHypot3(t.x, t.y, t.z)
+	if j.Sign() == 0 {
+		return point{
+			x: bfAdd(p1.x, bfMul(ex.x, r1)),
+			y: bfAdd(p1.y, bfMul(ex.y, r1)),
+			z: bfAdd(p1.z, bfMul(ex.z, r1)),
+		}
+	}
+	ey := point{x: bfQuo(t.x, j), y: bfQuo(t.y, j), z: bfQuo(t.z, j)}
 	ez := point{
-		ex.y*ey.z - ex.z*ey.y,
-		ex.z*ey.x - ex.x*ey.z,
-		ex.x*ey.y - ex.y*ey.x,
+		x: bfSub(bfMul(ex.y, ey.z), bfMul(ex.z, ey.y)),
+		y: bfSub(bfMul(ex.z, ey.x), bfMul(ex.x, ey.z)),
+		z: bfSub(bfMul(ex.x, ey.y), bfMul(ex.y, ey.x)),
 	}
-	x := (r1*r1 - r2*r2 + d*d) / (2 * d)
-	y := (r1*r1-r3*r3+i*i+j*j)/(2*j) - (i/j)*x
-	z := 0.0
-	if z2 := r1*r1 - x*x - y*y; z2 > 0 {
-		z = sign * math.Sqrt(z2)
-	} else if r1 > 0 {
+	x := bfQuo(bfAdd(bfSub(bfMul(r1, r1), bfMul(r2, r2)), bfMul(d, d)), bfMul(bfTwo, d))
+	num := bfAdd(bfSub(bfMul(r1, r1), bfMul(r3, r3)), bfAdd(bfMul(i, i), bfMul(j, j)))
+	y := bfSub(bfQuo(num, bfMul(bfTwo, j)), bfMul(bfQuo(i, j), x))
+	z := newFloat(0)
+	z2 := bfSub(bfMul(r1, r1), bfAdd(bfMul(x, x), bfMul(y, y)))
+	if z2.Sign() > 0 {
+		z = bfMul(sign, bfSqrt(z2))
+	} else if r1.Sign() > 0 {
 		// The spheres miss. Stay on the nearest sphere instead of extrapolating.
-		rad := math.Hypot(x, y)
-		if rad > 0 {
-			scale := r1 / rad
-			x *= scale
-			y *= scale
+		rad := bfHypot(x, y)
+		if rad.Sign() > 0 {
+			scale := bfQuo(r1, rad)
+			x = bfMul(x, scale)
+			y = bfMul(y, scale)
 		}
 	}
 	return point{
-		x: p1.x + x*ex.x + y*ey.x + z*ez.x,
-		y: p1.y + x*ex.y + y*ey.y + z*ez.y,
-		z: p1.z + x*ex.z + y*ey.z + z*ez.z,
+		x: bfAdd(p1.x, bfAdd(bfMul(x, ex.x), bfAdd(bfMul(y, ey.x), bfMul(z, ez.x)))),
+		y: bfAdd(p1.y, bfAdd(bfMul(x, ex.y), bfAdd(bfMul(y, ey.y), bfMul(z, ez.y)))),
+		z: bfAdd(p1.z, bfAdd(bfMul(x, ex.z), bfAdd(bfMul(y, ey.z), bfMul(z, ez.z)))),
 	}
 }
 
-func linkWeights(points []point) [][]float64 {
-	weights := make([][]float64, len(points))
+func linkWeights(points []point) [][]*big.Float {
+	weights := make([][]*big.Float, len(points))
 	for i := range points {
-		weights[i] = make([]float64, len(points))
+		weights[i] = make([]*big.Float, len(points))
 		for j := range points {
 			if i == j {
+				weights[i][j] = newFloat(0)
 				continue
 			}
-			weights[i][j] = math.Exp(-distance(points[i], points[j]))
+			weights[i][j] = bfExp(bfNeg(distance(points[i], points[j])))
 		}
 	}
 	return weights
@@ -598,22 +650,22 @@ func linkWeights(points []point) [][]float64 {
 
 // shiftPair moves a and b equally along the line between them so their
 // distance changes by delta. Positive delta pushes them apart.
-func shiftPair(points []point, a, b int, delta float64) {
-	dx := points[b].x - points[a].x
-	dy := points[b].y - points[a].y
-	dz := points[b].z - points[a].z
-	d := math.Hypot(dx, math.Hypot(dy, dz))
-	ux, uy, uz := 1.0, 0.0, 0.0
-	if d != 0 {
-		ux, uy, uz = dx/d, dy/d, dz/d
+func shiftPair(points []point, a, b int, delta *big.Float) {
+	dx := bfSub(points[b].x, points[a].x)
+	dy := bfSub(points[b].y, points[a].y)
+	dz := bfSub(points[b].z, points[a].z)
+	d := bfHypot3(dx, dy, dz)
+	ux, uy, uz := bfCopy(bfOne), newFloat(0), newFloat(0)
+	if d.Sign() != 0 {
+		ux, uy, uz = bfQuo(dx, d), bfQuo(dy, d), bfQuo(dz, d)
 	}
-	half := delta / 2
-	points[a].x -= ux * half
-	points[a].y -= uy * half
-	points[a].z -= uz * half
-	points[b].x += ux * half
-	points[b].y += uy * half
-	points[b].z += uz * half
+	half := bfQuo(delta, bfTwo)
+	points[a].x = bfSub(points[a].x, bfMul(ux, half))
+	points[a].y = bfSub(points[a].y, bfMul(uy, half))
+	points[a].z = bfSub(points[a].z, bfMul(uz, half))
+	points[b].x = bfAdd(points[b].x, bfMul(ux, half))
+	points[b].y = bfAdd(points[b].y, bfMul(uy, half))
+	points[b].z = bfAdd(points[b].z, bfMul(uz, half))
 }
 
 func randomSymmetricWeights(rng *rand.Rand) [][]int {
@@ -647,52 +699,40 @@ func setWeight(weights [][]int, a, b, value int) {
 	weights[b][a] = value
 }
 
-func lt(next, prev []float64) bool {
-	aa := 0.0
-	for _, value := range next {
-		aa += value * math.Log(value)
+func entropy(ranks []*big.Float) *big.Float {
+	h := newFloat(0)
+	for _, value := range ranks {
+		h = bfAdd(h, bfMul(value, bfLog(value)))
 	}
-	aa = -aa
-	bb := 0.0
-	for _, value := range prev {
-		bb += value * math.Log(value)
-	}
-	bb = -bb
-	return aa < bb
+	return bfNeg(h)
 }
 
-func gt(next, prev []float64) bool {
-	aa := 0.0
-	for _, value := range next {
-		aa += value * math.Log(value)
-	}
-	aa = -aa
-	bb := 0.0
-	for _, value := range prev {
-		bb += value * math.Log(value)
-	}
-	bb = -bb
-	return aa > bb
+func lt(next, prev []*big.Float) bool {
+	return entropy(next).Cmp(entropy(prev)) < 0
 }
 
-func printRanks(ranks []float64) {
-	sum := 0.0
+func gt(next, prev []*big.Float) bool {
+	return entropy(next).Cmp(entropy(prev)) > 0
+}
+
+func printRanks(ranks []*big.Float) {
+	sum := newFloat(0)
 	for i, rank := range ranks {
 		if i > 0 {
 			fmt.Print(" ")
 		}
-		fmt.Printf("%d:%.8f", i+1, rank)
-		sum += rank
+		fmt.Printf("%d:%s", i+1, rank.Text('f', 8))
+		sum = bfAdd(sum, rank)
 	}
-	fmt.Printf(" sum:%.8f\n", sum)
+	fmt.Printf(" sum:%s\n", sum.Text('f', 8))
 }
 
-func toFloat(weights [][]int) [][]float64 {
-	out := make([][]float64, len(weights))
+func toFloat(weights [][]int) [][]*big.Float {
+	out := make([][]*big.Float, len(weights))
 	for i := range weights {
-		out[i] = make([]float64, len(weights[i]))
+		out[i] = make([]*big.Float, len(weights[i]))
 		for j := range weights[i] {
-			out[i][j] = float64(weights[i][j])
+			out[i][j] = newInt(int64(weights[i][j]))
 		}
 	}
 	return out
@@ -701,59 +741,158 @@ func toFloat(weights [][]int) [][]float64 {
 // pageRank is the damped random walk on an undirected weighted graph.
 // Transition chance along an edge is proportional to its weight. A node with
 // no remaining weight spreads its rank evenly, which is the usual dangling-node rule.
-func pageRank(weights [][]float64) []float64 {
+func pageRank(weights [][]*big.Float) []*big.Float {
 	n := len(weights)
-	out := make([]float64, n)
+	out := make([]*big.Float, n)
 	for i := 0; i < n; i++ {
+		out[i] = newFloat(0)
 		for j := 0; j < n; j++ {
-			out[i] += weights[i][j]
+			out[i] = bfAdd(out[i], weights[i][j])
 		}
 	}
 
-	ranks := make([]float64, n)
-	next := make([]float64, n)
-	uniform := 1.0 / float64(n)
+	uniform := bfQuo(bfOne, newInt(int64(n)))
+	base := bfMul(bfSub(bfOne, bfDamping), uniform)
+	ranks := make([]*big.Float, n)
+	next := make([]*big.Float, n)
 	for i := range ranks {
-		ranks[i] = uniform
+		ranks[i] = bfCopy(uniform)
 	}
-	base := (1 - damping) * uniform
 
 	for iter := 0; iter < maxIter; iter++ {
 		for i := range next {
-			next[i] = base
+			next[i] = bfCopy(base)
 		}
-		dangling := 0.0
+		dangling := newFloat(0)
 		for j := 0; j < n; j++ {
-			if out[j] == 0 {
-				dangling += ranks[j]
+			if out[j].Sign() == 0 {
+				dangling = bfAdd(dangling, ranks[j])
 				continue
 			}
-			scale := damping * ranks[j] / out[j]
+			scale := bfQuo(bfMul(bfDamping, ranks[j]), out[j])
 			row := weights[j]
 			for i := 0; i < n; i++ {
-				if row[i] != 0 {
-					next[i] += scale * row[i]
+				if row[i].Sign() == 0 {
+					continue
 				}
+				next[i] = bfAdd(next[i], bfMul(scale, row[i]))
 			}
 		}
-		if dangling != 0 {
-			add := damping * dangling * uniform
+		if dangling.Sign() != 0 {
+			add := bfMul(bfDamping, bfMul(dangling, uniform))
 			for i := range next {
-				next[i] += add
+				next[i] = bfAdd(next[i], add)
 			}
 		}
 
-		delta := 0.0
+		delta := newFloat(0)
 		for i := 0; i < n; i++ {
-			diff := math.Abs(next[i] - ranks[i])
-			if diff > delta {
+			diff := bfAbs(bfSub(next[i], ranks[i]))
+			if diff.Cmp(delta) > 0 {
 				delta = diff
 			}
-			ranks[i] = next[i]
+			ranks[i] = bfCopy(next[i])
 		}
-		if delta < tolerance {
+		if delta.Cmp(bfTol) < 0 {
 			break
 		}
 	}
 	return ranks
+}
+
+func mustBF(s string) *big.Float {
+	f, ok := new(big.Float).SetPrec(prec).SetString(s)
+	if !ok {
+		panic("bad float " + s)
+	}
+	return f
+}
+
+func newFloat(v float64) *big.Float {
+	return new(big.Float).SetPrec(prec).SetFloat64(v)
+}
+
+func newInt(v int64) *big.Float {
+	return new(big.Float).SetPrec(prec).SetInt64(v)
+}
+
+func bfCopy(x *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Copy(x)
+}
+
+func bfAdd(a, b *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Add(a, b)
+}
+
+func bfSub(a, b *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Sub(a, b)
+}
+
+func bfMul(a, b *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Mul(a, b)
+}
+
+func bfQuo(a, b *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Quo(a, b)
+}
+
+func bfSqrt(a *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Sqrt(a)
+}
+
+func bfAbs(a *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Abs(a)
+}
+
+func bfNeg(a *big.Float) *big.Float {
+	return new(big.Float).SetPrec(prec).Neg(a)
+}
+
+func bfHypot(x, y *big.Float) *big.Float {
+	return bfSqrt(bfAdd(bfMul(x, x), bfMul(y, y)))
+}
+
+func bfHypot3(x, y, z *big.Float) *big.Float {
+	return bfSqrt(bfAdd(bfAdd(bfMul(x, x), bfMul(y, y)), bfMul(z, z)))
+}
+
+func bfDot(a, b point) *big.Float {
+	return bfAdd(bfAdd(bfMul(a.x, b.x), bfMul(a.y, b.y)), bfMul(a.z, b.z))
+}
+
+// bfLog is the natural log. The argument must be positive.
+func bfLog(x *big.Float) *big.Float {
+	mant := new(big.Float).SetPrec(prec)
+	exp := x.MantExp(mant)
+	z := bfQuo(bfSub(mant, bfOne), bfAdd(mant, bfOne))
+	z2 := bfMul(z, z)
+	sum := bfCopy(z)
+	term := bfCopy(z)
+	for k := 1; k < int(prec); k++ {
+		term = bfMul(term, z2)
+		sum = bfAdd(sum, bfQuo(term, newInt(int64(2*k+1))))
+		if term.Sign() != 0 && term.MantExp(nil) < -int(prec) {
+			break
+		}
+	}
+	return bfAdd(bfMul(bfTwo, sum), bfMul(newInt(int64(exp)), ln2))
+}
+
+// bfExp is the natural exponential.
+func bfExp(x *big.Float) *big.Float {
+	qf, _ := bfQuo(x, ln2).Float64()
+	n := int64(math.Round(qf))
+	r := bfSub(x, bfMul(newInt(n), ln2))
+	sum := bfCopy(bfOne)
+	term := bfCopy(bfOne)
+	for k := int64(1); k < int64(prec)*2; k++ {
+		term = bfQuo(bfMul(term, r), newInt(k))
+		sum = bfAdd(sum, term)
+		if term.Sign() != 0 && term.MantExp(nil) < -int(prec)-4 {
+			break
+		}
+	}
+	mant := new(big.Float).SetPrec(prec)
+	e := sum.MantExp(mant)
+	return new(big.Float).SetPrec(prec).SetMantExp(mant, e+int(n))
 }
