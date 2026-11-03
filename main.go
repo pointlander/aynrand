@@ -167,7 +167,7 @@ func snodgrass() {
 		beforeRanks := ranks
 		saved := cloneWeights(weights)
 
-		sample := newFloat(rng.NormFloat64())
+		sample := newFloat(.01 * rng.NormFloat64())
 		nextWeight := proposeSnodgrassWeight(before, sample)
 		setFloatWeight(weights, a, b, nextWeight)
 		points, xNode := syncOtherWeights(weights, a, b)
