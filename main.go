@@ -7,6 +7,8 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
+// -s is the integer-weight search. Each node also gets a 3D point from
+// trilateration of those weights, with node 1 held at the origin.
 package main
 
 import (
@@ -31,6 +33,8 @@ var (
 	FlagGraphical = flag.Bool("g", false, "graphical model")
 	// FlagEuclidean euclidean graphical model
 	FlagEuclidean = flag.Bool("e", false, "euclidean graphical model")
+	// FlagSnodgrass snodgrass graphical model
+	FlagSnodgrass = flag.Bool("s", false, "snodgrass graphical model")
 )
 
 func main() {
@@ -42,6 +46,10 @@ func main() {
 	}
 	if *FlagGraphical {
 		graphical()
+		return
+	}
+	if *FlagSnodgrass {
+		snodgrass()
 		return
 	}
 }
@@ -110,6 +118,73 @@ func graphical() {
 
 type point struct {
 	x, y, z float64
+}
+
+// snodgrass graphical model.
+// Link weights stay the integer search state. Coordinates are rebuilt from
+// those weights by trilateration whenever they are shown.
+func snodgrass() {
+	rng := rand.New(rand.NewSource(1))
+
+	weights := randomSymmetricWeights(rng)
+	ranks := pageRank(toFloat(weights))
+
+	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Println("initial")
+	printRanks(ranks)
+	reportCoordinates(weights)
+
+	for step := 1; ; step++ {
+		a, b := randomPair(rng)
+		before := weights[a][b]
+		beforeRanks := ranks
+
+		add := func() bool {
+			setWeight(weights, a, b, before+1)
+			plus := pageRank(toFloat(weights))
+			plusBoth := raisedBoth(plus, beforeRanks, a, b)
+			if plusBoth {
+				fmt.Println("++++++++++++++++++++++++++++++++++")
+				fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
+				printRanks(plus)
+				reportCoordinates(weights)
+				ranks = plus
+				return true
+			}
+			setWeight(weights, a, b, before)
+			return false
+		}
+
+		subtract := func() bool {
+			if before-1 < 1 {
+				return false
+			}
+
+			setWeight(weights, a, b, before-1)
+			minus := pageRank(toFloat(weights))
+			minusBoth := raisedBoth(minus, beforeRanks, a, b)
+			if minusBoth {
+				fmt.Println("----------------------------------")
+				fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
+				printRanks(minus)
+				reportCoordinates(weights)
+				ranks = minus
+				return true
+			}
+			setWeight(weights, a, b, before)
+			return false
+		}
+
+		if rng.Intn(2) == 0 {
+			if !add() {
+				subtract()
+			}
+		} else {
+			if !subtract() {
+				add()
+			}
+		}
+	}
 }
 
 // euclidean is the graphical model with each node placed in R^3.
@@ -201,6 +276,112 @@ func printPoint(i int, p point) {
 
 func distance(p, q point) float64 {
 	return math.Hypot(p.x-q.x, math.Hypot(p.y-q.y, p.z-q.z))
+}
+
+func reportCoordinates(weights [][]int) {
+	points, anchor := triangulate(toFloat(weights))
+	if anchor < 2 {
+		fmt.Println("coordinates by triangulation, node 1 at the origin, basis 1,2")
+	} else {
+		fmt.Printf("coordinates by triangulation, node 1 at the origin, basis 1,2,%d\n", anchor+1)
+	}
+	printPoints(points)
+}
+
+// triangulate embeds each node in R^3 from pairwise distances.
+// Node 0 is the origin and node 1 lies on the positive x-axis. The third
+// basis node is the one farthest from that axis, placed in the xy-plane
+// with positive y. Every other node is trilaterated from those three, on
+// the positive-z side of their plane.
+func triangulate(weights [][]float64) ([]point, int) {
+	n := len(weights)
+	points := make([]point, n)
+	if n < 2 {
+		return points, 0
+	}
+	d01 := weights[0][1]
+	if d01 == 0 {
+		d01 = 1
+	}
+	points[1] = point{x: d01}
+	if n < 3 {
+		return points, 1
+	}
+
+	anchor := 2
+	bestY := 0.0
+	best := placeInPlane(weights[0][2], weights[1][2], d01)
+	for k := 2; k < n; k++ {
+		p := placeInPlane(weights[0][k], weights[1][k], d01)
+		if p.y > bestY {
+			bestY = p.y
+			anchor = k
+			best = p
+		}
+	}
+	points[anchor] = best
+	if bestY == 0 {
+		for i := 2; i < n; i++ {
+			points[i] = placeInPlane(weights[0][i], weights[1][i], d01)
+		}
+		return points, anchor
+	}
+	for i := 2; i < n; i++ {
+		if i == anchor {
+			continue
+		}
+		points[i] = trilaterate(points[0], points[1], points[anchor], weights[0][i], weights[1][i], weights[anchor][i])
+	}
+	return points, anchor
+}
+
+// placeInPlane lays a point in the xy-plane given its distances to the
+// origin and to a point at (d01, 0, 0). y is zero when the two circles miss.
+func placeInPlane(d0, d1, d01 float64) point {
+	if d01 == 0 {
+		return point{x: d0}
+	}
+	x := (d01*d01 + d0*d0 - d1*d1) / (2 * d01)
+	y2 := d0*d0 - x*x
+	y := 0.0
+	if y2 > 0 {
+		y = math.Sqrt(y2)
+	}
+	return point{x: x, y: y}
+}
+
+// trilaterate returns the point at the given distances from p1, p2, and p3.
+// The z coordinate is taken non-negative in the plane's right-handed frame.
+func trilaterate(p1, p2, p3 point, r1, r2, r3 float64) point {
+	d := distance(p1, p2)
+	if d == 0 {
+		return point{x: p1.x + r1, y: p1.y, z: p1.z}
+	}
+	ex := point{(p2.x - p1.x) / d, (p2.y - p1.y) / d, (p2.z - p1.z) / d}
+	vx, vy, vz := p3.x-p1.x, p3.y-p1.y, p3.z-p1.z
+	i := ex.x*vx + ex.y*vy + ex.z*vz
+	tx, ty, tz := vx-i*ex.x, vy-i*ex.y, vz-i*ex.z
+	j := math.Hypot(tx, math.Hypot(ty, tz))
+	if j == 0 {
+		return point{x: p1.x + ex.x*r1, y: p1.y + ex.y*r1, z: p1.z + ex.z*r1}
+	}
+	ey := point{tx / j, ty / j, tz / j}
+	ez := point{
+		ex.y*ey.z - ex.z*ey.y,
+		ex.z*ey.x - ex.x*ey.z,
+		ex.x*ey.y - ex.y*ey.x,
+	}
+	x := (r1*r1 - r2*r2 + d*d) / (2 * d)
+	y := (r1*r1-r3*r3+i*i+j*j)/(2*j) - (i/j)*x
+	z := 0.0
+	if z2 := r1*r1 - x*x - y*y; z2 > 0 {
+		z = math.Sqrt(z2)
+	}
+	return point{
+		x: p1.x + x*ex.x + y*ey.x + z*ez.x,
+		y: p1.y + x*ex.y + y*ey.y + z*ez.y,
+		z: p1.z + x*ex.z + y*ey.z + z*ez.z,
+	}
 }
 
 func linkWeights(points []point) [][]float64 {
