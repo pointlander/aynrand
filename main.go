@@ -150,7 +150,7 @@ func snodgrass() {
 		setFloatWeight(weights, a, b, nextWeight)
 		points, xNode := syncOtherWeights(weights, a, b)
 		next := pageRank(expMinusWeights(weights))
-		if (step&1 == 1 && lt(next, beforeRanks)) || (step&1 == 0 && gt(next, beforeRanks)) {
+		if lt(next, beforeRanks) {
 			fmt.Printf("step %d nodes %d,%d weight %.6f -> %.6f sample %.6f\n", step, a+1, b+1, before, nextWeight, sample)
 			printRanks(next)
 			printEmbedding(points, xNode)
@@ -164,9 +164,9 @@ func snodgrass() {
 // proposeSnodgrassWeight adds a standard normal sample and keeps the link at least 0.1.
 func proposeSnodgrassWeight(before, sample float64) float64 {
 	next := before + sample
-	/*if next < snodgrassFloor {
+	if next < snodgrassFloor {
 		return snodgrassFloor
-	}*/
+	}
 	return next
 }
 
