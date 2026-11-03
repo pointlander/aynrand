@@ -7,8 +7,9 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s is the integer-weight search. Each node gets a 3D point by trilateration
-// from its nearest already placed neighbors. Node 1 is the origin.
+// -s uses float link weights. Setting one link rebuilds the coordinates and
+// replaces the other links with those Euclidean distances before PageRank.
+// Node 1 is the origin.
 package main
 
 import (
@@ -122,15 +123,15 @@ type point struct {
 }
 
 // snodgrass graphical model.
-// Link weights stay the integer search state. Coordinates are rebuilt from
-// those weights by nearest-neighbor trilateration whenever they are shown.
+// Weights are floats. A proposal sets one link, rebuilds the embedding, and
+// writes Euclidean distances back into every other link before PageRank.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
-	weights := randomSymmetricWeights(rng)
-	ranks := pageRank(toFloat(weights))
+	weights := toFloat(randomSymmetricWeights(rng))
+	ranks := pageRank(weights)
 
-	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Printf("33-node undirected graph, symmetric float weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
@@ -139,20 +140,22 @@ func snodgrass() {
 		a, b := randomPair(rng)
 		before := weights[a][b]
 		beforeRanks := ranks
+		saved := cloneWeights(weights)
 
 		add := func() bool {
-			setWeight(weights, a, b, before+1)
-			plus := pageRank(toFloat(weights))
+			setFloatWeight(weights, a, b, before+1)
+			points, xNode := syncOtherWeights(weights, a, b)
+			plus := pageRank(weights)
 			plusBoth := raisedBoth(plus, beforeRanks, a, b)
 			if plusBoth {
 				fmt.Println("++++++++++++++++++++++++++++++++++")
-				fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
+				fmt.Printf("step %d nodes %d,%d +1 weight %.6f -> %.6f both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
 				printRanks(plus)
-				reportCoordinates(weights)
+				printEmbedding(points, xNode)
 				ranks = plus
 				return true
 			}
-			setWeight(weights, a, b, before)
+			copyWeightsInto(weights, saved)
 			return false
 		}
 
@@ -161,18 +164,19 @@ func snodgrass() {
 				return false
 			}
 
-			setWeight(weights, a, b, before-1)
-			minus := pageRank(toFloat(weights))
+			setFloatWeight(weights, a, b, before-1)
+			points, xNode := syncOtherWeights(weights, a, b)
+			minus := pageRank(weights)
 			minusBoth := raisedBoth(minus, beforeRanks, a, b)
 			if minusBoth {
 				fmt.Println("----------------------------------")
-				fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
+				fmt.Printf("step %d nodes %d,%d -1 weight %.6f -> %.6f both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
 				printRanks(minus)
-				reportCoordinates(weights)
+				printEmbedding(points, xNode)
 				ranks = minus
 				return true
 			}
-			setWeight(weights, a, b, before)
+			copyWeightsInto(weights, saved)
 			return false
 		}
 
@@ -279,14 +283,58 @@ func distance(p, q point) float64 {
 	return math.Hypot(p.x-q.x, math.Hypot(p.y-q.y, p.z-q.z))
 }
 
-func reportCoordinates(weights [][]int) {
-	points, xNode := triangulate(toFloat(weights))
+func reportCoordinates(weights [][]float64) {
+	points, xNode := triangulate(weights)
+	printEmbedding(points, xNode)
+}
+
+func printEmbedding(points []point, xNode int) {
 	if xNode <= 0 {
 		fmt.Println("coordinates by nearest-point trilateration, node 1 at the origin")
 	} else {
 		fmt.Printf("coordinates by nearest-point trilateration, node 1 at the origin, node %d on the x-axis\n", xNode+1)
 	}
 	printPoints(points)
+}
+
+// syncOtherWeights embeds weights, then sets every edge except keepA-keepB
+// to the Euclidean distance of that embedding. The kept edge is the one
+// just edited. PageRank runs after this returns.
+func syncOtherWeights(weights [][]float64, keepA, keepB int) ([]point, int) {
+	if keepA > keepB {
+		keepA, keepB = keepB, keepA
+	}
+	points, xNode := triangulate(weights)
+	for i := range points {
+		for j := i + 1; j < len(points); j++ {
+			if i == keepA && j == keepB {
+				continue
+			}
+			d := distance(points[i], points[j])
+			weights[i][j] = d
+			weights[j][i] = d
+		}
+	}
+	return points, xNode
+}
+
+func cloneWeights(weights [][]float64) [][]float64 {
+	out := make([][]float64, len(weights))
+	for i := range weights {
+		out[i] = append([]float64(nil), weights[i]...)
+	}
+	return out
+}
+
+func copyWeightsInto(dst, src [][]float64) {
+	for i := range dst {
+		copy(dst[i], src[i])
+	}
+}
+
+func setFloatWeight(weights [][]float64, a, b int, value float64) {
+	weights[a][b] = value
+	weights[b][a] = value
 }
 
 // triangulate embeds each node from the link weights, using a local frame
