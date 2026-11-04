@@ -8,10 +8,11 @@
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
 // -s uses big.Float link weights. Each step samples two distinct nodes from
-// the PageRank distribution. A proposal adds a normal sample scaled by the
-// standard deviation of the weights to that link and clamps it at 0.1, then
-// rebuilds the coordinates and replaces the other links with those Euclidean
-// distances. PageRank uses the inverse square of each weight. Node 1 is the origin.
+// the live PageRank. A proposal adds a normal sample scaled by the standard
+// deviation of the weights to that link and clamps it at 0.1, then rebuilds
+// the coordinates. New distances are buffered and take effect after a delay
+// equal to the current distance, so a change moves at finite speed. PageRank
+// uses the inverse square of each weight. Node 1 is the origin.
 package main
 
 import (
@@ -148,41 +149,107 @@ func originPoint() point {
 
 // snodgrass graphical model.
 // Weights are big.Float values. Each step samples two distinct nodes from the
-// current PageRank. A proposal adds one normal sample, scaled by the standard
-// deviation of the current link weights, to that link, clamps the result at
-// 0.1, rebuilds the embedding, and writes Euclidean distances back into every
-// other link. PageRank sees the inverse square of each weight.
+// live PageRank. A proposal adds one normal sample, scaled by the standard
+// deviation of the accepted link weights, to a link, clamps the result at 0.1,
+// and rebuilds the embedding. Live distances keep their current values until a
+// delay of that many steps has elapsed, then take the accepted distance. A
+// later accept refreshes the buffered distance without extending the delay.
+// PageRank sees the inverse square of each weight.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
 	ranks := pageRank(expMinusWeights(weights))
+	goal := cloneWeights(weights)
+	goalRanks := ranks
+	due := make([][]int, len(weights))
+	for i := range due {
+		due[i] = make([]int, len(weights))
+	}
 
-	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, nodes sampled from PageRank, proposal N(0, σ) scaled by the weight standard deviation, clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
+	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, nodes sampled from PageRank, proposal N(0, σ) scaled by the weight standard deviation, clamped at %g, distance updates arrive after a delay equal to the current distance, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
 
 	for step := 1; ; step++ {
-		a, b := sampleRankPair(rng, ranks)
-		before := bfCopy(weights[a][b])
-		beforeRanks := ranks
-		saved := cloneWeights(weights)
+		if applyBuffered(weights, goal, due, step) {
+			ranks = pageRank(expMinusWeights(weights))
+		}
 
-		sample := bfMul(weightStdDev(weights), newFloat(.01*rng.NormFloat64()))
+		a, b := sampleRankPair(rng, ranks)
+		before := bfCopy(goal[a][b])
+		saved := cloneWeights(goal)
+
+		sample := bfMul(weightStdDev(goal), newFloat(.01*rng.NormFloat64()))
 		nextWeight := proposeSnodgrassWeight(before, sample)
-		setFloatWeight(weights, a, b, nextWeight)
-		points, xNode := syncOtherWeights(weights, a, b)
-		next := pageRank(expMinusWeights(weights))
-		if lt(next, beforeRanks) {
-			fmt.Printf("step %d nodes %d,%d weight %s -> %s sample %s\n", step, a+1, b+1, before.Text('f', 6), nextWeight.Text('f', 6), sample.Text('f', 6))
+		setFloatWeight(goal, a, b, nextWeight)
+		points, xNode := syncOtherWeights(goal, a, b)
+		next := pageRank(expMinusWeights(goal))
+		if lt(next, goalRanks) {
+			scheduleWeights(due, weights, goal, step)
+			delay := 0
+			if due[a][b] != 0 {
+				delay = due[a][b] - step
+			}
+			fmt.Printf("step %d nodes %d,%d weight %s -> %s sample %s delay %d\n", step, a+1, b+1, before.Text('f', 6), nextWeight.Text('f', 6), sample.Text('f', 6), delay)
 			printRanks(next)
 			printEmbedding(points, xNode)
-			ranks = next
+			goalRanks = next
 			continue
 		}
-		copyWeightsInto(weights, saved)
+		copyWeightsInto(goal, saved)
 	}
+}
+
+// travelDelay is how many steps a distance update waits. The wait equals the
+// current distance rounded to the nearest integer, and it is at least 1 so the
+// live weight does not change in the accepting step.
+func travelDelay(distance *big.Float) int {
+	v, _ := distance.Float64()
+	if math.IsNaN(v) || v < 1 {
+		return 1
+	}
+	d := int(math.Round(v))
+	if d < 1 {
+		return 1
+	}
+	return d
+}
+
+// scheduleWeights buffers goal distances that differ from the live weights.
+// The arrival step is the current step plus the live distance. An edge that
+// already has a buffered update keeps its arrival step and picks up the new
+// goal value when that step comes.
+func scheduleWeights(due [][]int, applied, goal [][]*big.Float, step int) {
+	for i := 0; i < len(goal); i++ {
+		for j := i + 1; j < len(goal); j++ {
+			if applied[i][j].Cmp(goal[i][j]) == 0 {
+				due[i][j] = 0
+				continue
+			}
+			if due[i][j] == 0 {
+				due[i][j] = step + travelDelay(applied[i][j])
+			}
+		}
+	}
+}
+
+// applyBuffered writes goal distances whose travel time has elapsed into the
+// live weights. due is 0 when an edge has nothing waiting.
+func applyBuffered(applied, goal [][]*big.Float, due [][]int, step int) bool {
+	arrived := false
+	for i := 0; i < len(applied); i++ {
+		for j := i + 1; j < len(applied); j++ {
+			if due[i][j] == 0 || due[i][j] > step {
+				continue
+			}
+			setFloatWeight(applied, i, j, goal[i][j])
+			due[i][j] = 0
+			arrived = true
+		}
+	}
+	return arrived
 }
 
 // weightStdDev is the population standard deviation of the undirected link weights.
