@@ -7,8 +7,9 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s uses big.Float link weights. A proposal adds a normal sample scaled by
-// the standard deviation of the weights to one link and clamps it at 0.1, then
+// -s uses big.Float link weights. Each step samples two distinct nodes from
+// the PageRank distribution. A proposal adds a normal sample scaled by the
+// standard deviation of the weights to that link and clamps it at 0.1, then
 // rebuilds the coordinates and replaces the other links with those Euclidean
 // distances. PageRank uses the inverse square of each weight. Node 1 is the origin.
 package main
@@ -146,23 +147,24 @@ func originPoint() point {
 }
 
 // snodgrass graphical model.
-// Weights are big.Float values. A proposal adds one normal sample, scaled by
-// the standard deviation of the current link weights, to a link, clamps the
-// result at 0.1, rebuilds the embedding, and writes Euclidean distances back
-// into every other link. PageRank sees the inverse square of each weight.
+// Weights are big.Float values. Each step samples two distinct nodes from the
+// current PageRank. A proposal adds one normal sample, scaled by the standard
+// deviation of the current link weights, to that link, clamps the result at
+// 0.1, rebuilds the embedding, and writes Euclidean distances back into every
+// other link. PageRank sees the inverse square of each weight.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
 	ranks := pageRank(expMinusWeights(weights))
 
-	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, proposal N(0, σ) scaled by the weight standard deviation, clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
+	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, nodes sampled from PageRank, proposal N(0, σ) scaled by the weight standard deviation, clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
 
 	for step := 1; ; step++ {
-		a, b := randomPair(rng)
+		a, b := sampleRankPair(rng, ranks)
 		before := bfCopy(weights[a][b])
 		beforeRanks := ranks
 		saved := cloneWeights(weights)
@@ -702,6 +704,41 @@ func randomSymmetricWeights(rng *rand.Rand) [][]int {
 		}
 	}
 	return weights
+}
+
+// sampleRankPair draws two distinct nodes with probability proportional to PageRank.
+// The second draw is taken from the remaining nodes.
+func sampleRankPair(rng *rand.Rand, ranks []*big.Float) (int, int) {
+	a := sampleRankNode(rng, ranks, -1)
+	b := sampleRankNode(rng, ranks, a)
+	if a > b {
+		a, b = b, a
+	}
+	return a, b
+}
+
+func sampleRankNode(rng *rand.Rand, ranks []*big.Float, skip int) int {
+	total := newFloat(0)
+	for i, rank := range ranks {
+		if i == skip {
+			continue
+		}
+		total = bfAdd(total, rank)
+	}
+	mark := bfMul(total, newFloat(rng.Float64()))
+	acc := newFloat(0)
+	chosen := 0
+	for i, rank := range ranks {
+		if i == skip {
+			continue
+		}
+		chosen = i
+		acc = bfAdd(acc, rank)
+		if acc.Cmp(mark) >= 0 {
+			return i
+		}
+	}
+	return chosen
 }
 
 func randomPair(rng *rand.Rand) (int, int) {
