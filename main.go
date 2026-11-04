@@ -7,10 +7,10 @@
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
 // entropy of PageRank decreases.
-// -s uses big.Float link weights. A proposal adds a standard normal sample to
-// one link and clamps it at 0.1, then rebuilds the coordinates and replaces the
-// other links with those Euclidean distances. PageRank uses the inverse square
-// of each weight. Node 1 is the origin.
+// -s uses big.Float link weights. A proposal adds a normal sample scaled by
+// the standard deviation of the weights to one link and clamps it at 0.1, then
+// rebuilds the coordinates and replaces the other links with those Euclidean
+// distances. PageRank uses the inverse square of each weight. Node 1 is the origin.
 package main
 
 import (
@@ -146,17 +146,17 @@ func originPoint() point {
 }
 
 // snodgrass graphical model.
-// Weights are big.Float values. A proposal adds one standard normal sample to
-// a link, clamps the result at 0.1, rebuilds the embedding, and writes
-// Euclidean distances back into every other link. PageRank sees the inverse
-// square of each weight.
+// Weights are big.Float values. A proposal adds one normal sample, scaled by
+// the standard deviation of the current link weights, to a link, clamps the
+// result at 0.1, rebuilds the embedding, and writes Euclidean distances back
+// into every other link. PageRank sees the inverse square of each weight.
 func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
 	ranks := pageRank(expMinusWeights(weights))
 
-	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, proposal N(0,1) clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
+	fmt.Printf("33-node undirected graph, symmetric big.Float weights uniform on %d..%d, proposal N(0, σ) scaled by the weight standard deviation, clamped at %g, PageRank uses 1/weight^2, damping %g\n", minWeight, maxWeight, snodgrassFloor, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 	reportCoordinates(weights)
@@ -167,7 +167,7 @@ func snodgrass() {
 		beforeRanks := ranks
 		saved := cloneWeights(weights)
 
-		sample := newFloat(.01 * rng.NormFloat64())
+		sample := bfMul(weightStdDev(weights), newFloat(.01*rng.NormFloat64()))
 		nextWeight := proposeSnodgrassWeight(before, sample)
 		setFloatWeight(weights, a, b, nextWeight)
 		points, xNode := syncOtherWeights(weights, a, b)
@@ -183,7 +183,29 @@ func snodgrass() {
 	}
 }
 
-// proposeSnodgrassWeight adds a standard normal sample and keeps the link at least 0.1.
+// weightStdDev is the population standard deviation of the undirected link weights.
+func weightStdDev(weights [][]*big.Float) *big.Float {
+	n := 0
+	sum := newFloat(0)
+	for i := 0; i < len(weights); i++ {
+		for j := i + 1; j < len(weights); j++ {
+			sum = bfAdd(sum, weights[i][j])
+			n++
+		}
+	}
+	count := newInt(int64(n))
+	mean := bfQuo(sum, count)
+	acc := newFloat(0)
+	for i := 0; i < len(weights); i++ {
+		for j := i + 1; j < len(weights); j++ {
+			d := bfSub(weights[i][j], mean)
+			acc = bfAdd(acc, bfMul(d, d))
+		}
+	}
+	return bfSqrt(bfQuo(acc, count))
+}
+
+// proposeSnodgrassWeight adds the scaled sample and keeps the link at least 0.1.
 func proposeSnodgrassWeight(before, sample *big.Float) *big.Float {
 	next := bfAdd(before, sample)
 	if next.Cmp(bfFloor) < 0 {
