@@ -86,51 +86,33 @@ func graphical() {
 
 	for step := 1; ; step++ {
 		a, b := randomPair(rng)
-		before := weights[a][b]
+		beforeX, beforeY := weights[a][b], weights[b][a]
 		beforeRanks := ranks
 
-		add := func() bool {
-			setWeight(weights, a, b, before+1)
+		mutate := func(x, y int) bool {
+			setWeight(weights, a, b, beforeX+x)
+			setWeight(weights, b, a, beforeY+y)
 			plus := pageRank(toFloat(weights))
 			plusBoth := lt(plus, beforeRanks)
 			if plusBoth {
-				fmt.Println("++++++++++++++++++++++++++++++++++")
-				fmt.Printf("step %d nodes %d,%d +1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before+1, plusBoth)
+				fmt.Printf("step %d nodes %d,%d %d %d\n", step, a+1, b+1, x, y)
 				printRanks(plus)
 				ranks = plus
 				return true
 			}
-			setWeight(weights, a, b, before)
+			setWeight(weights, a, b, beforeX)
+			setWeight(weights, b, a, beforeY)
 			return false
 		}
 
-		subtract := func() bool {
-			if before-1 < 1 {
-				return false
-			}
-
-			setWeight(weights, a, b, before-1)
-			minus := pageRank(toFloat(weights))
-			minusBoth := lt(minus, beforeRanks)
-			if minusBoth {
-				fmt.Println("----------------------------------")
-				fmt.Printf("step %d nodes %d,%d -1 weight %d -> %d both_increased %t\n", step, a+1, b+1, before, before-1, minusBoth)
-				printRanks(minus)
-				ranks = minus
-				return true
-			}
-			setWeight(weights, a, b, before)
-			return false
-		}
-
-		if rng.Intn(2) == 0 {
-			if !add() {
-				subtract()
-			}
-		} else {
-			if !subtract() {
-				add()
-			}
+		if choice := rng.Intn(4); choice == 0 {
+			mutate(1, 1)
+		} else if choice == 1 {
+			mutate(1, -1)
+		} else if choice == 2 {
+			mutate(-1, 1)
+		} else if choice == 3 {
+			mutate(-1, -1)
 		}
 	}
 }
@@ -873,7 +855,7 @@ func pageRank(weights [][]*big.Float) []*big.Float {
 	for i := 0; i < n; i++ {
 		out[i] = newFloat(0)
 		for j := 0; j < n; j++ {
-			out[i] = bfAdd(out[i], weights[i][j])
+			out[i] = bfAdd(out[i], bfAbs(weights[i][j]))
 		}
 	}
 
@@ -901,7 +883,7 @@ func pageRank(weights [][]*big.Float) []*big.Float {
 				if row[i].Sign() == 0 {
 					continue
 				}
-				next[i] = bfAdd(next[i], bfMul(scale, row[i]))
+				next[i] = bfAdd(next[i], bfMul(scale, bfAbs(row[i])))
 			}
 		}
 		if dangling.Sign() != 0 {
