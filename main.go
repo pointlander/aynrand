@@ -13,6 +13,9 @@
 // the coordinates. New distances are buffered and take effect after a delay
 // equal to the current distance, so a change moves at finite speed. PageRank
 // uses the inverse square of each weight. Node 1 is the origin.
+// -lm walks a directed graphical language model. From the current node it
+// tries ±1 on each direction of every edge, moves to the lowest-entropy
+// trial, and keeps that change when the entropy falls.
 package main
 
 import (
@@ -51,7 +54,7 @@ var (
 var (
 	// FlagGraphical graphical model
 	FlagGraphical = flag.Bool("g", false, "graphical model")
-	// FlagGraphiclLM graphical language model
+	// FlagGraphicalLM graphical language model
 	FlagGraphicalLM = flag.Bool("lm", false, "graphical language model")
 	// FlagEuclidean euclidean graphical model
 	FlagEuclidean = flag.Bool("e", false, "euclidean graphical model")
@@ -123,60 +126,63 @@ func graphical() {
 	}
 }
 
-// graphicall  language model
+// graphicallm walks the graph as a language model. Nodes are tokens. From the
+// current token, every other token is scored by trying ±1 on each direction of
+// that edge, all against the same weights. The walk moves to the lowest
+// entropy, and that directed update is kept only when the entropy falls.
 func graphicallm() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := randomSymmetricWeights(rng)
 	ranks := pageRank(toFloat(weights))
+	currentH := entropy(ranks)
 
-	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Printf("%d-node directed graphical language model, weights uniform on %d..%d, damping %g\n", nodeCount, minWeight, maxWeight, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 
 	a := 0
-	for step := 1; ; step++ {
-		min, next := mustBF(fmt.Sprintf("%f", math.MaxFloat64)), 0
-		for b := 0; b < 33; b++ {
-			if b == a {
-				continue
-			}
-			beforeX, beforeY := weights[a][b], weights[b][a]
-			beforeRanks := ranks
-
-			mutate := func(x, y int) bool {
-				setWeight(weights, a, b, beforeX+x)
-				setWeight(weights, b, a, beforeY+y)
-				plus := pageRank(toFloat(weights))
-				plusBoth := lt(plus, beforeRanks)
-				e := entropy(plus)
-				if e.Cmp(min) < 0 {
-					min, next = e, b
-				}
-				if plusBoth {
-					//fmt.Printf("step %d nodes %d,%d %d %d\n", step, a+1, b+1, x, y)
-					//printRanks(plus)
-					ranks = plus
-					return true
-				}
-				setWeight(weights, a, b, beforeX)
-				setWeight(weights, b, a, beforeY)
-				return false
-			}
-
-			if choice := rng.Intn(4); choice == 0 {
-				mutate(1, 1)
-			} else if choice == 1 {
-				mutate(1, -1)
-			} else if choice == 2 {
-				mutate(-1, 1)
-			} else if choice == 3 {
-				mutate(-1, -1)
-			}
+	for {
+		b, x, y, h, _, improved := bestDirectedStep(weights, a, currentH)
+		if improved {
+			weights[a][b] += x
+			weights[b][a] += y
+			currentH = h
 		}
-		a = next
+		a = b
 		fmt.Println(a)
 	}
+}
+
+// bestDirectedStep returns the neighboring token and directed ±1 update with
+// the lowest PageRank entropy. weights is restored before returning. improved
+// is true when that entropy is below currentH.
+func bestDirectedStep(weights [][]int, a int, currentH *big.Float) (b, x, y int, h *big.Float, ranks []*big.Float, improved bool) {
+	n := len(weights)
+	deltas := [4][2]int{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}}
+	b = -1
+	for j := 0; j < n; j++ {
+		if j == a {
+			continue
+		}
+		beforeX, beforeY := weights[a][j], weights[j][a]
+		for _, d := range deltas {
+			weights[a][j] = beforeX + d[0]
+			weights[j][a] = beforeY + d[1]
+			plus := pageRank(toFloat(weights))
+			eh := entropy(plus)
+			if h == nil || eh.Cmp(h) < 0 {
+				h = eh
+				ranks = plus
+				b = j
+				x, y = d[0], d[1]
+			}
+			weights[a][j] = beforeX
+			weights[j][a] = beforeY
+		}
+	}
+	improved = h != nil && h.Cmp(currentH) < 0
+	return
 }
 
 type point struct {
