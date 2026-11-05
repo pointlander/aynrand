@@ -51,6 +51,8 @@ var (
 var (
 	// FlagGraphical graphical model
 	FlagGraphical = flag.Bool("g", false, "graphical model")
+	// FlagGraphiclLM graphical language model
+	FlagGraphicalLM = flag.Bool("lm", false, "graphical language model")
 	// FlagEuclidean euclidean graphical model
 	FlagEuclidean = flag.Bool("e", false, "euclidean graphical model")
 	// FlagSnodgrass snodgrass graphical model
@@ -65,6 +67,10 @@ func main() {
 	}
 	if *FlagGraphical {
 		graphical()
+		return
+	}
+	if *FlagGraphicalLM {
+		graphicallm()
 		return
 	}
 	if *FlagSnodgrass {
@@ -114,6 +120,62 @@ func graphical() {
 		} else if choice == 3 {
 			mutate(-1, -1)
 		}
+	}
+}
+
+// graphicall  language model
+func graphicallm() {
+	rng := rand.New(rand.NewSource(1))
+
+	weights := randomSymmetricWeights(rng)
+	ranks := pageRank(toFloat(weights))
+
+	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Println("initial")
+	printRanks(ranks)
+
+	a := 0
+	for step := 1; ; step++ {
+		min, next := mustBF(fmt.Sprintf("%f", math.MaxFloat64)), 0
+		for b := 0; b < 33; b++ {
+			if b == a {
+				continue
+			}
+			beforeX, beforeY := weights[a][b], weights[b][a]
+			beforeRanks := ranks
+
+			mutate := func(x, y int) bool {
+				setWeight(weights, a, b, beforeX+x)
+				setWeight(weights, b, a, beforeY+y)
+				plus := pageRank(toFloat(weights))
+				plusBoth := lt(plus, beforeRanks)
+				e := entropy(plus)
+				if e.Cmp(min) < 0 {
+					min, next = e, b
+				}
+				if plusBoth {
+					//fmt.Printf("step %d nodes %d,%d %d %d\n", step, a+1, b+1, x, y)
+					//printRanks(plus)
+					ranks = plus
+					return true
+				}
+				setWeight(weights, a, b, beforeX)
+				setWeight(weights, b, a, beforeY)
+				return false
+			}
+
+			if choice := rng.Intn(4); choice == 0 {
+				mutate(1, 1)
+			} else if choice == 1 {
+				mutate(1, -1)
+			} else if choice == 2 {
+				mutate(-1, 1)
+			} else if choice == 3 {
+				mutate(-1, -1)
+			}
+		}
+		a = next
+		fmt.Println(a)
 	}
 }
 
