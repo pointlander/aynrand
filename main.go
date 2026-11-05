@@ -14,9 +14,9 @@
 // equal to the current distance, so a change moves at finite speed. PageRank
 // uses the inverse square of each weight. Node 1 is the origin.
 // -lm walks a directed graphical language model over a-z and space. Edge
-// weights are bigram counts from 100.txt.utf-8. From the current symbol it
-// tries ±1 on each direction of every edge, moves to the lowest-entropy
-// trial, and keeps that change when the entropy falls.
+// weights are bigram counts from 100.txt.utf-8. Monte Carlo tree search
+// chooses the next symbol and a directed ±1000 update by the entropy of
+// the PageRank reached several moves ahead.
 package main
 
 import (
@@ -130,15 +130,31 @@ func graphical() {
 }
 
 const (
-	lmSymbols  = "abcdefghijklmnopqrstuvwxyz "
-	lmTextPath = "100.txt.utf-8"
+	lmSymbols   = "abcdefghijklmnopqrstuvwxyz "
+	lmTextPath  = "100.txt.utf-8"
+	lmDelta     = 1000
+	lmMCTSSims  = 40
+	lmMCTSWidth = 8
+	lmRollout   = 3
+	lmMaxDepth  = 4
+	lmUCB       = 0.05
 )
 
+var lmDeltas = [4][2]int{
+	{lmDelta, lmDelta},
+	{lmDelta, -lmDelta},
+	{-lmDelta, lmDelta},
+	{-lmDelta, -lmDelta},
+}
+
+// lmMove is one directed weight update and the symbol the walk moves to.
+type lmMove struct {
+	b, x, y int
+}
+
 // graphicallm walks the graph as a language model. Nodes are a-z and space.
-// Weights are directed bigram counts from 100.txt.utf-8. From the current
-// symbol, every other symbol is scored by trying ±1 on each direction of that
-// edge, all against the same weights. The walk moves to the lowest entropy,
-// and that directed update is kept only when the entropy falls.
+// Weights are directed bigram counts from 100.txt.utf-8. Monte Carlo tree
+// search picks the next symbol and a directed ±1000 update.
 func graphicallm() {
 	data, err := os.ReadFile(lmTextPath)
 	if err != nil {
@@ -151,23 +167,177 @@ func graphicallm() {
 		os.Exit(1)
 	}
 	ranks := pageRank(toFloat(weights))
-	currentH := entropy(ranks)
 
-	fmt.Printf("directed graphical language model on %q, bigram counts from %s, damping %g\n", lmSymbols, lmTextPath, damping)
+	fmt.Printf("directed graphical language model on %q, bigram counts from %s, monte carlo tree search, damping %g\n", lmSymbols, lmTextPath, damping)
 	fmt.Println("initial")
 	printSymbolRanks(ranks)
 
+	rng := rand.New(rand.NewSource(1))
 	a := start
 	for {
 		fmt.Printf("%c", lmSymbols[a])
-		b, x, y, h, _, improved := bestDirectedStep(weights, a, currentH)
-		if improved {
-			weights[a][b] += x
-			weights[b][a] += y
-			currentH = h
-		}
-		a = b
+		move := mctsStep(weights, a, rng)
+		weights[a][move.b] += move.x
+		weights[move.b][a] += move.y
+		a = move.b
 	}
+}
+
+// mctsStep searches continuations from symbol and returns the first move of
+// the best one. weights is left unchanged.
+func mctsStep(weights [][]int, symbol int, rng *rand.Rand) lmMove {
+	root := &lmNode{
+		symbol:  symbol,
+		weights: cloneIntMatrix(weights),
+		untried: sampleLMMoves(rng, len(weights), symbol, lmMCTSWidth),
+	}
+	for i := 0; i < lmMCTSSims; i++ {
+		root.simulate(rng)
+	}
+	if len(root.children) == 0 {
+		return randomLMMove(rng, len(weights), symbol)
+	}
+	return root.bestChild().move
+}
+
+// lmNode is one position in the search tree. weights are the bigram counts
+// after the move that entered this node. A rollout's reward is the negation
+// of the PageRank entropy, so a lower entropy scores higher.
+type lmNode struct {
+	parent   *lmNode
+	symbol   int
+	weights  [][]int
+	move     lmMove
+	untried  []lmMove
+	children []*lmNode
+	visits   int
+	value    float64
+}
+
+func (n *lmNode) simulate(rng *rand.Rand) {
+	node := n
+	for depth := 0; depth < lmMaxDepth; depth++ {
+		if len(node.untried) > 0 {
+			node = node.expand(rng)
+			break
+		}
+		if len(node.children) == 0 {
+			break
+		}
+		node = node.uctChild()
+	}
+	reward := node.rollout(rng)
+	for cur := node; cur != nil; cur = cur.parent {
+		cur.visits++
+		cur.value += reward
+	}
+}
+
+func (n *lmNode) expand(rng *rand.Rand) *lmNode {
+	i := rng.Intn(len(n.untried))
+	move := n.untried[i]
+	n.untried = append(n.untried[:i], n.untried[i+1:]...)
+	weights := cloneIntMatrix(n.weights)
+	applyLMMove(weights, n.symbol, move)
+	child := &lmNode{
+		parent:  n,
+		symbol:  move.b,
+		weights: weights,
+		move:    move,
+		untried: sampleLMMoves(rng, len(weights), move.b, lmMCTSWidth),
+	}
+	n.children = append(n.children, child)
+	return child
+}
+
+func (n *lmNode) uctChild() *lmNode {
+	logN := math.Log(float64(n.visits))
+	best := n.children[0]
+	bestScore := math.Inf(-1)
+	for _, child := range n.children {
+		q := child.value / float64(child.visits)
+		score := q + lmUCB*math.Sqrt(logN/float64(child.visits))
+		if score > bestScore {
+			best = child
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func (n *lmNode) bestChild() *lmNode {
+	best := n.children[0]
+	bestQ := best.mean()
+	for _, child := range n.children[1:] {
+		if q := child.mean(); q > bestQ {
+			best = child
+			bestQ = q
+		}
+	}
+	return best
+}
+
+func (n *lmNode) mean() float64 {
+	if n.visits == 0 {
+		return math.Inf(-1)
+	}
+	return n.value / float64(n.visits)
+}
+
+// rollout plays random directed updates, then scores the PageRank entropy.
+func (n *lmNode) rollout(rng *rand.Rand) float64 {
+	weights := cloneIntMatrix(n.weights)
+	symbol := n.symbol
+	for i := 0; i < lmRollout; i++ {
+		move := randomLMMove(rng, len(weights), symbol)
+		applyLMMove(weights, symbol, move)
+		symbol = move.b
+	}
+	h, _ := entropy(pageRank(toFloat(weights))).Float64()
+	return -h
+}
+
+func applyLMMove(weights [][]int, symbol int, move lmMove) {
+	weights[symbol][move.b] += move.x
+	weights[move.b][symbol] += move.y
+}
+
+func randomLMMove(rng *rand.Rand, n, symbol int) lmMove {
+	b := rng.Intn(n - 1)
+	if b >= symbol {
+		b++
+	}
+	d := lmDeltas[rng.Intn(len(lmDeltas))]
+	return lmMove{b: b, x: d[0], y: d[1]}
+}
+
+func sampleLMMoves(rng *rand.Rand, n, symbol, k int) []lmMove {
+	legal := (n - 1) * len(lmDeltas)
+	if legal < 1 {
+		return nil
+	}
+	if k > legal {
+		k = legal
+	}
+	seen := make(map[lmMove]struct{}, k)
+	out := make([]lmMove, 0, k)
+	for len(out) < k {
+		move := randomLMMove(rng, n, symbol)
+		if _, ok := seen[move]; ok {
+			continue
+		}
+		seen[move] = struct{}{}
+		out = append(out, move)
+	}
+	return out
+}
+
+func cloneIntMatrix(weights [][]int) [][]int {
+	out := make([][]int, len(weights))
+	for i := range weights {
+		out[i] = append([]int(nil), weights[i]...)
+	}
+	return out
 }
 
 // lmWeights counts directed bigrams. Letters are folded to lowercase.
@@ -222,37 +392,6 @@ func printSymbolRanks(ranks []*big.Float) {
 		sum = bfAdd(sum, rank)
 	}
 	fmt.Printf(" sum:%s\n", sum.Text('f', 8))
-}
-
-// bestDirectedStep returns the neighboring token and directed ±1 update with
-// the lowest PageRank entropy. weights is restored before returning. improved
-// is true when that entropy is below currentH.
-func bestDirectedStep(weights [][]int, a int, currentH *big.Float) (b, x, y int, h *big.Float, ranks []*big.Float, improved bool) {
-	n := len(weights)
-	deltas := [4][2]int{{1e3, 1e3}, {1e3, -1e3}, {-1e3, 1e3}, {-1e3, -1e3}}
-	b = -1
-	for j := 0; j < n; j++ {
-		if j == a {
-			continue
-		}
-		beforeX, beforeY := weights[a][j], weights[j][a]
-		for _, d := range deltas {
-			weights[a][j] = beforeX + d[0]
-			weights[j][a] = beforeY + d[1]
-			plus := pageRank(toFloat(weights))
-			eh := entropy(plus)
-			if h == nil || eh.Cmp(h) < 0 {
-				h = eh
-				ranks = plus
-				b = j
-				x, y = d[0], d[1]
-			}
-			weights[a][j] = beforeX
-			weights[j][a] = beforeY
-		}
-	}
-	improved = h != nil && h.Cmp(currentH) < 0
-	return
 }
 
 type point struct {
