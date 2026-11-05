@@ -15,8 +15,8 @@
 // uses the inverse square of each weight. Node 1 is the origin.
 // -lm walks a directed graphical language model over a-z and space. Edge
 // weights are bigram counts from 100.txt.utf-8. Monte Carlo tree search
-// chooses the next symbol and a directed ±1000 update by the entropy of
-// the PageRank reached several moves ahead.
+// samples each next symbol from the outgoing link weights, then scores the
+// chain by its PageRank entropy.
 package main
 
 import (
@@ -154,7 +154,8 @@ type lmMove struct {
 
 // graphicallm walks the graph as a language model. Nodes are a-z and space.
 // Weights are directed bigram counts from 100.txt.utf-8. Monte Carlo tree
-// search picks the next symbol and a directed ±1000 update.
+// search samples the next symbol from the outgoing link weights and keeps
+// the directed ±1000 update whose chain has the lowest PageRank entropy.
 func graphicallm() {
 	data, err := os.ReadFile(lmTextPath)
 	if err != nil {
@@ -168,7 +169,7 @@ func graphicallm() {
 	}
 	ranks := pageRank(toFloat(weights))
 
-	fmt.Printf("directed graphical language model on %q, bigram counts from %s, monte carlo tree search, damping %g\n", lmSymbols, lmTextPath, damping)
+	fmt.Printf("directed graphical language model on %q, bigram counts from %s, monte carlo tree search sampled from link weights, damping %g\n", lmSymbols, lmTextPath, damping)
 	fmt.Println("initial")
 	printSymbolRanks(ranks)
 
@@ -189,20 +190,21 @@ func mctsStep(weights [][]int, symbol int, rng *rand.Rand) lmMove {
 	root := &lmNode{
 		symbol:  symbol,
 		weights: cloneIntMatrix(weights),
-		untried: sampleLMMoves(rng, len(weights), symbol, lmMCTSWidth),
+		untried: sampleLMMoves(rng, weights, symbol, lmMCTSWidth),
 	}
 	for i := 0; i < lmMCTSSims; i++ {
 		root.simulate(rng)
 	}
 	if len(root.children) == 0 {
-		return randomLMMove(rng, len(weights), symbol)
+		return weightedLMMove(rng, weights, symbol)
 	}
 	return root.bestChild().move
 }
 
 // lmNode is one position in the search tree. weights are the bigram counts
-// after the move that entered this node. A rollout's reward is the negation
-// of the PageRank entropy, so a lower entropy scores higher.
+// after the move that entered this node. A rollout samples a chain from the
+// link weights and scores it by the mean PageRank entropy along that chain.
+// The reward is the negation, so a lower entropy scores higher.
 type lmNode struct {
 	parent   *lmNode
 	symbol   int
@@ -234,9 +236,8 @@ func (n *lmNode) simulate(rng *rand.Rand) {
 }
 
 func (n *lmNode) expand(rng *rand.Rand) *lmNode {
-	i := rng.Intn(len(n.untried))
-	move := n.untried[i]
-	n.untried = append(n.untried[:i], n.untried[i+1:]...)
+	move := n.untried[0]
+	n.untried = n.untried[1:]
 	weights := cloneIntMatrix(n.weights)
 	applyLMMove(weights, n.symbol, move)
 	child := &lmNode{
@@ -244,7 +245,7 @@ func (n *lmNode) expand(rng *rand.Rand) *lmNode {
 		symbol:  move.b,
 		weights: weights,
 		move:    move,
-		untried: sampleLMMoves(rng, len(weights), move.b, lmMCTSWidth),
+		untried: sampleLMMoves(rng, weights, move.b, lmMCTSWidth),
 	}
 	n.children = append(n.children, child)
 	return child
@@ -284,52 +285,124 @@ func (n *lmNode) mean() float64 {
 	return n.value / float64(n.visits)
 }
 
-// rollout plays random directed updates, then scores the PageRank entropy.
+// rollout samples a chain from the outgoing link weights. Each step's PageRank
+// entropy is averaged, and the reward is the negation of that average.
 func (n *lmNode) rollout(rng *rand.Rand) float64 {
 	weights := cloneIntMatrix(n.weights)
 	symbol := n.symbol
+	sum := 0.0
 	for i := 0; i < lmRollout; i++ {
-		move := randomLMMove(rng, len(weights), symbol)
+		move := weightedLMMove(rng, weights, symbol)
 		applyLMMove(weights, symbol, move)
 		symbol = move.b
+		sum += chainEntropy(weights)
 	}
+	return -sum / float64(lmRollout)
+}
+
+func chainEntropy(weights [][]int) float64 {
 	h, _ := entropy(pageRank(toFloat(weights))).Float64()
-	return -h
+	return h
 }
 
 func applyLMMove(weights [][]int, symbol int, move lmMove) {
+	if move.b == symbol {
+		weights[symbol][symbol] += move.x
+		return
+	}
 	weights[symbol][move.b] += move.x
 	weights[move.b][symbol] += move.y
 }
 
-func randomLMMove(rng *rand.Rand, n, symbol int) lmMove {
-	b := rng.Intn(n - 1)
-	if b >= symbol {
-		b++
-	}
+// weightedLMMove draws the next symbol with probability proportional to the
+// absolute outgoing link weight, then draws a directed ±1000 update.
+func weightedLMMove(rng *rand.Rand, weights [][]int, symbol int) lmMove {
+	b := sampleSymbol(rng, weights, symbol)
 	d := lmDeltas[rng.Intn(len(lmDeltas))]
 	return lmMove{b: b, x: d[0], y: d[1]}
 }
 
-func sampleLMMoves(rng *rand.Rand, n, symbol, k int) []lmMove {
-	legal := (n - 1) * len(lmDeltas)
-	if legal < 1 {
-		return nil
+func sampleSymbol(rng *rand.Rand, weights [][]int, symbol int) int {
+	n := len(weights)
+	total := 0.0
+	mass := make([]float64, n)
+	for b := 0; b < n; b++ {
+		mass[b] = math.Abs(float64(weights[symbol][b]))
+		total += mass[b]
 	}
-	if k > legal {
-		k = legal
+	if total == 0 {
+		return rng.Intn(n)
 	}
-	seen := make(map[lmMove]struct{}, k)
-	out := make([]lmMove, 0, k)
-	for len(out) < k {
-		move := randomLMMove(rng, n, symbol)
-		if _, ok := seen[move]; ok {
+	mark := rng.Float64() * total
+	acc := 0.0
+	last := 0
+	for b, w := range mass {
+		if w == 0 {
 			continue
 		}
-		seen[move] = struct{}{}
-		out = append(out, move)
+		last = b
+		acc += w
+		if acc >= mark {
+			return b
+		}
+	}
+	return last
+}
+
+// sampleLMMoves draws distinct symbols without replacement, proportional to
+// the absolute outgoing link weight. A zero row falls back to a uniform draw.
+func sampleLMMoves(rng *rand.Rand, weights [][]int, symbol, k int) []lmMove {
+	n := len(weights)
+	if n == 0 || k < 1 {
+		return nil
+	}
+	if k > n {
+		k = n
+	}
+	remaining := make([]float64, n)
+	picked := make([]bool, n)
+	total := 0.0
+	for b := 0; b < n; b++ {
+		remaining[b] = math.Abs(float64(weights[symbol][b]))
+		total += remaining[b]
+	}
+	out := make([]lmMove, 0, k)
+	for len(out) < k {
+		b := pickSymbol(rng, remaining, picked, total)
+		total -= remaining[b]
+		remaining[b] = 0
+		picked[b] = true
+		d := lmDeltas[rng.Intn(len(lmDeltas))]
+		out = append(out, lmMove{b: b, x: d[0], y: d[1]})
 	}
 	return out
+}
+
+func pickSymbol(rng *rand.Rand, remaining []float64, picked []bool, total float64) int {
+	n := len(remaining)
+	if total <= 0 {
+		var choices []int
+		for b := 0; b < n; b++ {
+			if !picked[b] {
+				choices = append(choices, b)
+			}
+		}
+		return choices[rng.Intn(len(choices))]
+	}
+	mark := rng.Float64() * total
+	acc := 0.0
+	last := 0
+	for b, w := range remaining {
+		if w == 0 {
+			continue
+		}
+		last = b
+		acc += w
+		if acc >= mark {
+			return b
+		}
+	}
+	return last
 }
 
 func cloneIntMatrix(weights [][]int) [][]int {
