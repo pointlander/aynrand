@@ -13,7 +13,8 @@
 // the coordinates. New distances are buffered and take effect after a delay
 // equal to the current distance, so a change moves at finite speed. PageRank
 // uses the inverse square of each weight. Node 1 is the origin.
-// -lm walks a directed graphical language model. From the current node it
+// -lm walks a directed graphical language model over a-z and space. Edge
+// weights are bigram counts from 100.txt.utf-8. From the current symbol it
 // tries ±1 on each direction of every edge, moves to the lowest-entropy
 // trial, and keeps that change when the entropy falls.
 package main
@@ -24,7 +25,9 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
+	"os"
 	"sort"
+	"unicode"
 )
 
 const (
@@ -126,23 +129,37 @@ func graphical() {
 	}
 }
 
-// graphicallm walks the graph as a language model. Nodes are tokens. From the
-// current token, every other token is scored by trying ±1 on each direction of
-// that edge, all against the same weights. The walk moves to the lowest
-// entropy, and that directed update is kept only when the entropy falls.
-func graphicallm() {
-	rng := rand.New(rand.NewSource(1))
+const (
+	lmSymbols  = "abcdefghijklmnopqrstuvwxyz "
+	lmTextPath = "100.txt.utf-8"
+)
 
-	weights := randomSymmetricWeights(rng)
+// graphicallm walks the graph as a language model. Nodes are a-z and space.
+// Weights are directed bigram counts from 100.txt.utf-8. From the current
+// symbol, every other symbol is scored by trying ±1 on each direction of that
+// edge, all against the same weights. The walk moves to the lowest entropy,
+// and that directed update is kept only when the entropy falls.
+func graphicallm() {
+	data, err := os.ReadFile(lmTextPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", lmTextPath, err)
+		os.Exit(1)
+	}
+	weights, start := lmWeights(string(data))
+	if start < 0 {
+		fmt.Fprintf(os.Stderr, "%s has no letters\n", lmTextPath)
+		os.Exit(1)
+	}
 	ranks := pageRank(toFloat(weights))
 	currentH := entropy(ranks)
 
-	fmt.Printf("%d-node directed graphical language model, weights uniform on %d..%d, damping %g\n", nodeCount, minWeight, maxWeight, damping)
+	fmt.Printf("directed graphical language model on %q, bigram counts from %s, damping %g\n", lmSymbols, lmTextPath, damping)
 	fmt.Println("initial")
-	printRanks(ranks)
+	printSymbolRanks(ranks)
 
-	a := 0
+	a := start
 	for {
+		fmt.Printf("%c", lmSymbols[a])
 		b, x, y, h, _, improved := bestDirectedStep(weights, a, currentH)
 		if improved {
 			weights[a][b] += x
@@ -150,8 +167,61 @@ func graphicallm() {
 			currentH = h
 		}
 		a = b
-		fmt.Println(a)
 	}
+}
+
+// lmWeights counts directed bigrams. Letters are folded to lowercase.
+// Punctuation is dropped. A run of whitespace becomes one space.
+// The second result is the first symbol, or -1 when the text has no letters.
+func lmWeights(text string) ([][]int, int) {
+	n := len(lmSymbols)
+	weights := make([][]int, n)
+	for i := range weights {
+		weights[i] = make([]int, n)
+	}
+	space := n - 1
+	prev := -1
+	first := -1
+	gap := false
+	emit := func(idx int) {
+		if prev >= 0 {
+			weights[prev][idx]++
+		}
+		if first < 0 {
+			first = idx
+		}
+		prev = idx
+		gap = false
+	}
+	for _, r := range text {
+		switch {
+		case r >= 'a' && r <= 'z':
+			if gap && prev >= 0 && prev != space {
+				emit(space)
+			}
+			emit(int(r - 'a'))
+		case r >= 'A' && r <= 'Z':
+			if gap && prev >= 0 && prev != space {
+				emit(space)
+			}
+			emit(int(r - 'A'))
+		case unicode.IsSpace(r):
+			gap = true
+		}
+	}
+	return weights, first
+}
+
+func printSymbolRanks(ranks []*big.Float) {
+	sum := newFloat(0)
+	for i, rank := range ranks {
+		if i > 0 {
+			fmt.Print(" ")
+		}
+		fmt.Printf("%c:%s", lmSymbols[i], rank.Text('f', 8))
+		sum = bfAdd(sum, rank)
+	}
+	fmt.Printf(" sum:%s\n", sum.Text('f', 8))
 }
 
 // bestDirectedStep returns the neighboring token and directed ±1 update with
@@ -159,7 +229,7 @@ func graphicallm() {
 // is true when that entropy is below currentH.
 func bestDirectedStep(weights [][]int, a int, currentH *big.Float) (b, x, y int, h *big.Float, ranks []*big.Float, improved bool) {
 	n := len(weights)
-	deltas := [4][2]int{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}}
+	deltas := [4][2]int{{1e3, 1e3}, {1e3, -1e3}, {-1e3, 1e3}, {-1e3, -1e3}}
 	b = -1
 	for j := 0; j < n; j++ {
 		if j == a {
