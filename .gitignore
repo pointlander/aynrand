@@ -1,0 +1,8 @@
+# Compiled binaries
+*.exe
+*.test
+*.out
+decompress
+
+# Compressor output
+*.ap1
