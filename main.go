@@ -111,6 +111,12 @@ func graphical() {
 		beforeRanks := ranks
 
 		mutate := func(x, y int) bool {
+			if beforeX+x < 1 {
+				return false
+			}
+			if beforeY+y < 1 {
+				return false
+			}
 			setWeight(weights, a, b, beforeX+x)
 			setWeight(weights, b, a, beforeY+y)
 			plus := pageRank(toFloat(weights))
@@ -127,9 +133,13 @@ func graphical() {
 		}
 
 		if choice := rng.Intn(2); choice == 0 {
-			mutate(-1, 1)
+			if !mutate(-1, 1) {
+				mutate(1, -1)
+			}
 		} else if choice == 1 {
-			mutate(1, -1)
+			if !mutate(1, -1) {
+				mutate(-1, 1)
+			}
 		}
 	}
 }
