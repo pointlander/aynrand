@@ -98,7 +98,7 @@ func main() {
 func graphical() {
 	rng := rand.New(rand.NewSource(1))
 
-	weights := randomSymmetricWeights(rng)
+	weights := symmetricWeights(rng)
 	ranks := pageRank(toFloat(weights))
 
 	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, nodes sampled from PageRank, damping %g\n", minWeight, maxWeight, damping)
@@ -126,14 +126,10 @@ func graphical() {
 			return false
 		}
 
-		if choice := rng.Intn(4); choice == 0 {
-			mutate(1, 1)
+		if choice := rng.Intn(2); choice == 0 {
+			mutate(-1, 1)
 		} else if choice == 1 {
 			mutate(1, -1)
-		} else if choice == 2 {
-			mutate(-1, 1)
-		} else if choice == 3 {
-			mutate(-1, -1)
 		}
 	}
 }
@@ -1171,6 +1167,20 @@ func shiftPair(points []point, a, b int, delta *big.Float) {
 	points[b].x = bfAdd(points[b].x, bfMul(ux, half))
 	points[b].y = bfAdd(points[b].y, bfMul(uy, half))
 	points[b].z = bfAdd(points[b].z, bfMul(uz, half))
+}
+
+func symmetricWeights(rng *rand.Rand) [][]int {
+	weights := make([][]int, nodeCount)
+	for i := range weights {
+		weights[i] = make([]int, nodeCount)
+	}
+	for i := 0; i < nodeCount; i++ {
+		for j := i + 1; j < nodeCount; j++ {
+			weights[i][j] = maxWeight
+			weights[j][i] = weights[i][j]
+		}
+	}
+	return weights
 }
 
 func randomSymmetricWeights(rng *rand.Rand) [][]int {
