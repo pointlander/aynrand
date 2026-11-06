@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// -g perturbs one integer link weight by ±1.
+// -g perturbs one integer link weight by ±1. The two nodes are sampled from
+// the PageRank.
 // -e gives every node an (x, y, z) coordinate. PageRank uses e to the minus
 // Euclidean distance as the link weight. A random pair is moved so that
 // distance changes by 1. Either model keeps a proposal when the Shannon
@@ -92,12 +93,12 @@ func graphical() {
 	weights := randomSymmetricWeights(rng)
 	ranks := pageRank(toFloat(weights))
 
-	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, damping %g\n", minWeight, maxWeight, damping)
+	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, nodes sampled from PageRank, damping %g\n", minWeight, maxWeight, damping)
 	fmt.Println("initial")
 	printRanks(ranks)
 
 	for step := 1; ; step++ {
-		a, b := randomPair(rng)
+		a, b := sampleRankPair(rng, ranks)
 		beforeX, beforeY := weights[a][b], weights[b][a]
 		beforeRanks := ranks
 
