@@ -17,7 +17,9 @@
 // -lm walks a directed graphical language model over a-z and space. Edge
 // weights are bigram counts from 100.txt.utf-8. Monte Carlo tree search
 // samples each next symbol from the outgoing link weights, then scores the
-// chain by its PageRank entropy.
+// chain by its PageRank entropy. The same text is also split into 64 KiB
+// chunks, and each chunk's order-2 Markov graph has its PageRank entropy
+// printed.
 package main
 
 import (
@@ -62,6 +64,8 @@ var (
 	FlagGraphicalLM = flag.Bool("lm", false, "graphical language model")
 	// FlagEuclidean euclidean graphical model
 	FlagEuclidean = flag.Bool("e", false, "euclidean graphical model")
+	// FlagEntropyLM entropy language model
+	FlagEntropyLM = flag.Bool("elm", false, "entropy language model")
 	// FlagSnodgrass snodgrass graphical model
 	FlagSnodgrass = flag.Bool("s", false, "snodgrass graphical model")
 )
@@ -70,6 +74,10 @@ func main() {
 	flag.Parse()
 	if *FlagEuclidean {
 		euclidean()
+		return
+	}
+	if *FlagEntropyLM {
+		entropylm()
 		return
 	}
 	if *FlagGraphical {
@@ -139,6 +147,7 @@ const (
 	lmRollout   = 3
 	lmMaxDepth  = 4
 	lmUCB       = 0.05
+	lmChunkSize = 64 * 1024
 )
 
 var lmDeltas = [4][2]int{
@@ -151,6 +160,16 @@ var lmDeltas = [4][2]int{
 // lmMove is one directed weight update and the symbol the walk moves to.
 type lmMove struct {
 	b, x, y int
+}
+
+// entropylm prints the entropy of the 64k chunks of the text
+func entropylm() {
+	data, err := os.ReadFile(lmTextPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", lmTextPath, err)
+		os.Exit(1)
+	}
+	printMarkovChunkEntropies(data)
 }
 
 // graphicallm walks the graph as a language model. Nodes are a-z and space.
@@ -414,26 +433,15 @@ func cloneIntMatrix(weights [][]int) [][]int {
 	return out
 }
 
-// lmWeights counts directed bigrams. Letters are folded to lowercase.
-// Punctuation is dropped. A run of whitespace becomes one space.
-// The second result is the first symbol, or -1 when the text has no letters.
-func lmWeights(text string) ([][]int, int) {
-	n := len(lmSymbols)
-	weights := make([][]int, n)
-	for i := range weights {
-		weights[i] = make([]int, n)
-	}
-	space := n - 1
+// lmTokens folds letters to lowercase, drops punctuation, and turns each run
+// of whitespace into one space.
+func lmTokens(text string) []int {
+	space := len(lmSymbols) - 1
+	var tokens []int
 	prev := -1
-	first := -1
 	gap := false
 	emit := func(idx int) {
-		if prev >= 0 {
-			weights[prev][idx]++
-		}
-		if first < 0 {
-			first = idx
-		}
+		tokens = append(tokens, idx)
 		prev = idx
 		gap = false
 	}
@@ -453,7 +461,80 @@ func lmWeights(text string) ([][]int, int) {
 			gap = true
 		}
 	}
-	return weights, first
+	return tokens
+}
+
+// lmWeights counts directed bigrams. The second result is the first symbol,
+// or -1 when the text has no letters.
+func lmWeights(text string) ([][]int, int) {
+	tokens := lmTokens(text)
+	n := len(lmSymbols)
+	weights := make([][]int, n)
+	for i := range weights {
+		weights[i] = make([]int, n)
+	}
+	if len(tokens) == 0 {
+		return weights, -1
+	}
+	for i := 0; i+1 < len(tokens); i++ {
+		weights[tokens[i]][tokens[i+1]]++
+	}
+	return weights, tokens[0]
+}
+
+// printMarkovChunkEntropies splits the file into 64 KiB chunks. Each chunk
+// becomes an order-2 Markov graph whose nodes are successive symbol pairs and
+// whose edges follow the next symbol. The printed value is the Shannon
+// entropy of that graph's PageRank.
+func printMarkovChunkEntropies(data []byte) {
+	for off, n := 0, 0; off < len(data); off, n = off+lmChunkSize, n+1 {
+		end := off + lmChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		h := markovChunkEntropy(lmTokens(string(data[off:end])))
+		fmt.Printf("chunk %d entropy %s\n", n, h.Text('f', 8))
+	}
+}
+
+func markovChunkEntropy(tokens []int) *big.Float {
+	weights := order2Markov(tokens)
+	if len(weights) == 0 {
+		return newFloat(0)
+	}
+	return entropy(pageRank(toFloat(weights)))
+}
+
+// order2Markov builds the transition counts of symbol pairs. A node is one
+// ordered pair, and the edge (a,b) -> (b,c) records the trigram a,b,c.
+func order2Markov(tokens []int) [][]int {
+	if len(tokens) < 2 {
+		return nil
+	}
+	nSym := len(lmSymbols)
+	index := make(map[int]int)
+	id := func(a, b int) int {
+		key := a*nSym + b
+		if i, ok := index[key]; ok {
+			return i
+		}
+		i := len(index)
+		index[key] = i
+		return i
+	}
+	for i := 0; i+1 < len(tokens); i++ {
+		id(tokens[i], tokens[i+1])
+	}
+	weights := make([][]int, len(index))
+	for i := range weights {
+		weights[i] = make([]int, len(index))
+	}
+	for i := 0; i+2 < len(tokens); i++ {
+		from := id(tokens[i], tokens[i+1])
+		to := id(tokens[i+1], tokens[i+2])
+		weights[from][to]++
+	}
+	return weights
 }
 
 func printSymbolRanks(ranks []*big.Float) {
