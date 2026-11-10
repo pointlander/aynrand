@@ -99,7 +99,7 @@ func graphical() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := symmetricWeights(rng)
-	ranks := pageRank(toFloat(weights))
+	ranks := pageRank(expMinusWeights(toFloat(weights)))
 
 	fmt.Printf("33-node undirected graph, symmetric weights uniform on %d..%d, nodes sampled from PageRank, damping %g\n", minWeight, maxWeight, damping)
 	fmt.Println("initial")
@@ -119,7 +119,7 @@ func graphical() {
 			}
 			setWeight(weights, a, b, beforeX+x)
 			setWeight(weights, b, a, beforeY+y)
-			plus := pageRank(toFloat(weights))
+			plus := pageRank(expMinusWeights(toFloat(weights)))
 			plusBoth := lt(plus, beforeRanks)
 			if plusBoth {
 				fmt.Printf("step %d nodes %d,%d %d %d\n", step, a+1, b+1, x, y)
