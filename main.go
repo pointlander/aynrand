@@ -141,6 +141,16 @@ func graphical() {
 				mutate(-1, 1)
 			}
 		}
+		if step%33 == 0 {
+			for i := range weights {
+				for j := range weights[i] {
+					if i == j {
+						continue
+					}
+					weights[i][j] += 1
+				}
+			}
+		}
 	}
 }
 
