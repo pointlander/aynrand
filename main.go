@@ -579,7 +579,7 @@ func snodgrass() {
 	rng := rand.New(rand.NewSource(1))
 
 	weights := toFloat(randomSymmetricWeights(rng))
-	ranks := pageRank(expMinusWeights(weights))
+	ranks := pageRank(gravitationalWeights(weights))
 	goal := cloneWeights(weights)
 	goalRanks := ranks
 	due := make([][]int, len(weights))
@@ -594,7 +594,7 @@ func snodgrass() {
 
 	for step := 1; ; step++ {
 		if applyBuffered(weights, goal, due, step) {
-			ranks = pageRank(expMinusWeights(weights))
+			ranks = pageRank(gravitationalWeights(weights))
 		}
 
 		a, b := sampleRankPair(rng, ranks)
@@ -605,7 +605,7 @@ func snodgrass() {
 		nextWeight := proposeSnodgrassWeight(before, sample)
 		setFloatWeight(goal, a, b, nextWeight)
 		points, xNode := syncOtherWeights(goal, a, b)
-		next := pageRank(expMinusWeights(goal))
+		next := pageRank(gravitationalWeights(goal))
 		if lt(next, goalRanks) {
 			scheduleWeights(due, weights, goal, step)
 			delay := 0
@@ -854,7 +854,7 @@ func setFloatWeight(weights [][]*big.Float, a, b int, value *big.Float) {
 	weights[b][a] = bfCopy(value)
 }
 
-// expMinusWeights returns the inverse square of each off-diagonal weight.
+// expMinusWeights returns the inverse exp of each off-diagonal weight.
 func expMinusWeights(weights [][]*big.Float) [][]*big.Float {
 	out := make([][]*big.Float, len(weights))
 	for i := range weights {
@@ -864,7 +864,22 @@ func expMinusWeights(weights [][]*big.Float) [][]*big.Float {
 				out[i][j] = newFloat(0)
 				continue
 			}
-			//out[i][j] = bfExp(bfNeg(weights[i][j]))
+			out[i][j] = bfExp(bfNeg(weights[i][j]))
+		}
+	}
+	return out
+}
+
+// gravitationalWeights returns the inverse square of each off-diagonal weight.
+func gravitationalWeights(weights [][]*big.Float) [][]*big.Float {
+	out := make([][]*big.Float, len(weights))
+	for i := range weights {
+		out[i] = make([]*big.Float, len(weights[i]))
+		for j := range weights[i] {
+			if i == j || weights[i][j].Sign() == 0 {
+				out[i][j] = newFloat(0)
+				continue
+			}
 			out[i][j] = bfQuo(bfG, bfMul(weights[i][j], weights[i][j]))
 		}
 	}
