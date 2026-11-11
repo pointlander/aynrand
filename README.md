@@ -8,7 +8,7 @@ go run . -g
 
 ## Modes
 
-`-g` builds a 33-node undirected graph with symmetric integer weights from 1 to 33. Each step draws two nodes from the current PageRank and tries a directed ±1 on that link, keeping the weight at least 1. PageRank sees the inverse square of each weight, scaled by the gravitational constant.
+`-g` builds a 33-node undirected graph with symmetric integer weights from 1 to 33. Each step draws two nodes from the current PageRank and tries a directed ±1 on that link, keeping the weight at least 1. PageRank sees the inverse exp of each weight.
 
 `-e` places the same 33 nodes in three dimensions. PageRank uses e to the minus Euclidean distance. A random pair is moved so the distance between them changes by 1.
 
